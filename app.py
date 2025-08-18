@@ -65,62 +65,39 @@ class VideoAnalyzer:
         self.current_events = []
         self.session_id = None
     
-    def analyze_video(self, video_path):
-        """分析影片，提取事件"""
+    def analyze_videos(self, video_paths):
+        """分析多個影片，提取事件"""
         try:
-            if not video_path:
+            if not video_paths:
                 return "請上傳影片檔案", [], ""
+            
+            # 確保是串列
+            if not isinstance(video_paths, list):
+                video_paths = [video_paths]
             
             self.session_id = str(uuid.uuid4())[:8]
             session_dir = self.work_dir / self.session_id
             session_dir.mkdir(exist_ok=True)
             
-            print("開始分析影片...")
+            all_video_detections = []
+            video_summaries = []
             
-            # 打開影片
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                return "無法打開影片檔案", [], ""
+            print(f"準備分析 {len(video_paths)} 個影片...")
             
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            duration = total_frames / fps if fps > 0 else 0
-            
-            print(f"影片資訊: {total_frames} 幀, {fps:.1f} FPS, {duration:.1f} 秒")
-            
-            # 收集所有偵測結果
-            all_detections = []
-            frame_idx = 0
-            sample_interval = max(1, int(fps * 1.0))  # 每 1 秒採樣一幀
-            
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            # 處理每個影片
+            for video_idx, video_path in enumerate(video_paths):
+                video_name = Path(video_path).name
+                print(f"\n分析影片 {video_idx+1}/{len(video_paths)}: {video_name}")
                 
-                if frame_idx % 100 == 0:  # 每 100 幀顯示進度
-                    print(f"分析進度: {frame_idx}/{total_frames} 幀 ({frame_idx/total_frames*100:.1f}%)")
-                
-                # 採樣策略：每秒取一幀
-                if frame_idx % sample_interval == 0:
-                    timestamp = frame_idx / fps
-                    detections = self._detect_objects(frame, frame_idx, timestamp)
-                    if detections:
-                        all_detections.extend(detections)
-                
-                frame_idx += 1
-                
-                # 釋放記憶體
-                if frame_idx % 500 == 0:
-                    import gc
-                    gc.collect()
+                # 分析單個影片
+                video_detections, summary = self._analyze_single_video(video_path, video_idx, video_name)
+                video_summaries.append(summary)
+                all_video_detections.extend(video_detections)
             
-            cap.release()
-            
-            print(f"\n偵測到 {len(all_detections)} 個物件，開始分組...")
+            print(f"\n總共偵測到 {len(all_video_detections)} 個物件，開始分組...")
             
             # 按 ReID 分組事件
-            events = self._group_detections_by_reid(all_detections, session_dir)
+            events = self._group_detections_by_reid(all_video_detections, session_dir)
             
             print(f"分析完成！找到 {len(events)} 個事件")
             
@@ -129,9 +106,14 @@ class VideoAnalyzer:
             # 生成分析結果
             result_text = f"""
 分析完成！
-影片時長：{duration:.1f} 秒
-採樣間隔：{sample_interval/fps:.1f} 秒
-總偵測數：{len(all_detections)} 個
+影片數量：{len(video_paths)} 個
+"""
+            for summary in video_summaries:
+                result_text += f"\n{summary['name']}: {summary['detections']} 個偵測, {summary['duration']:.1f} 秒"
+            
+            result_text += f"""
+
+總偵測數：{len(all_video_detections)} 個
 分組事件數：{len(events)} 個
 
 使用上方輪播介面進行標註
@@ -152,6 +134,61 @@ class VideoAnalyzer:
             import traceback
             traceback.print_exc()
             return f"分析失敗: {str(e)}", [], "錯誤"
+    
+    def _analyze_single_video(self, video_path, video_idx, video_name):
+        """分析單個影片"""
+        # 打開影片
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"無法打開影片檔案: {video_name}")
+            return [], {'name': video_name, 'detections': 0, 'duration': 0}
+        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = total_frames / fps if fps > 0 else 0
+        
+        print(f"影片資訊: {total_frames} 幀, {fps:.1f} FPS, {duration:.1f} 秒")
+        
+        # 收集偵測結果
+        video_detections = []
+        frame_idx = 0
+        sample_interval = max(1, int(fps * 1.0))  # 每 1 秒採樣一幀
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            if frame_idx % 100 == 0:  # 每 100 幀顯示進度
+                print(f"分析進度: {frame_idx}/{total_frames} 幀 ({frame_idx/total_frames*100:.1f}%)")
+            
+            # 採樣策略：每秒取一幀
+            if frame_idx % sample_interval == 0:
+                timestamp = frame_idx / fps
+                detections = self._detect_objects(frame, frame_idx, timestamp)
+                if detections:
+                    # 加上影片來源資訊
+                    for det in detections:
+                        det['video_name'] = video_name
+                        det['video_idx'] = video_idx
+                    video_detections.extend(detections)
+            
+            frame_idx += 1
+            
+            # 釋放記憶體
+            if frame_idx % 500 == 0:
+                import gc
+                gc.collect()
+        
+        cap.release()
+        
+        summary = {
+            'name': video_name,
+            'detections': len(video_detections),
+            'duration': duration
+        }
+        
+        return video_detections, summary
     
     def _detect_objects(self, frame, frame_idx, timestamp):
         """在幀中偵測物件"""
@@ -275,8 +312,14 @@ class VideoAnalyzer:
                             'image_path': str(crop_path),  # 保持相容性
                             'timestamp': det['timestamp'],
                             'confidence': det['confidence'],
-                            'bbox': det['bbox']
+                            'bbox': det['bbox'],
+                            'video_name': det.get('video_name', 'unknown'),
+                            'video_idx': det.get('video_idx', 0)
                         })
+                    
+                    # 獲取主要影片來源
+                    video_names = list(set(det.get('video_name', 'unknown') for det in group_dets))
+                    primary_video = video_names[0] if len(video_names) == 1 else 'multiple'
                     
                     event = {
                         'id': group_id,
@@ -286,6 +329,8 @@ class VideoAnalyzer:
                         'duration': float(group_dets[-1]['timestamp'] - group_dets[0]['timestamp']),
                         'frame_count': len(group_dets),
                         'avg_confidence': float(np.mean([d['confidence'] for d in group_dets])),
+                        'video_name': primary_video,
+                        'video_names': video_names,
                         'label': None  # 待標註
                     }
                     events.append(event)
@@ -397,7 +442,7 @@ def create_interface():
     
     with gr.Blocks(title="火煙誤判標註系統", theme=gr.themes.Soft()) as app:
         gr.Markdown("# 🔥 火煙誤判標註系統")
-        gr.Markdown("上傳影片 → 自動偵測火煙事件 → 快速標註真實/誤判 → 匯出訓練資料集")
+        gr.Markdown("上傳多個影片 → 批次分析火煙事件 → 統一標註真實/誤判 → 匯出訓練資料集")
         
         # 狀態變數
         current_event_idx = gr.State(0)
@@ -405,13 +450,17 @@ def create_interface():
         
         with gr.Row():
             with gr.Column(scale=1):
-                video_input = gr.Video(label="上傳影片檔案")
+                video_input = gr.File(
+                    label="上傳影片檔案（支援多檔案）",
+                    file_count="multiple",
+                    file_types=[".mp4", ".mov", ".avi", ".mkv", ".webm"]
+                )
                 analyze_btn = gr.Button("🔍 開始分析", variant="primary")
                 
                 analysis_result = gr.Textbox(
                     label="分析結果",
                     lines=10,
-                    placeholder="上傳影片並點擊分析按鈕"
+                    placeholder="上傳影片檔案（支援多個檔案）並點擊分析按鈕"
                 )
                 
             with gr.Column(scale=2):
@@ -488,6 +537,12 @@ def create_interface():
                            f"幀數: {event['frame_count']} | " \
                            f"信心度: {event['avg_confidence']:.2f}"
                 
+                # 顯示影片來源
+                if 'video_name' in event and event['video_name'] != 'multiple':
+                    info_text += f" | 來源: {event['video_name']}"
+                elif 'video_names' in event and len(event['video_names']) > 1:
+                    info_text += f" | 來源: {len(event['video_names'])} 個影片"
+                
                 if event['label']:
                     info_text += f" | 已標註: {event['label']}"
                 
@@ -541,6 +596,15 @@ def create_interface():
         def skip_current(event_idx):
             return label_and_next(event_idx, None)[0], 0
         
+        # 處理上傳的檔案
+        def process_uploaded_files(files):
+            if not files:
+                return "請上傳影片檔案", [], ""
+            
+            # 提取檔案路徑
+            video_paths = [file.name for file in files] if isinstance(files, list) else [files.name]
+            return analyzer.analyze_videos(video_paths)
+        
         # 分析影片完成後的處理
         def on_analysis_complete(result, gallery, status):
             if analyzer.current_events:
@@ -550,7 +614,7 @@ def create_interface():
         
         # 分析影片
         analyze_btn.click(
-            analyzer.analyze_video,
+            process_uploaded_files,
             inputs=[video_input],
             outputs=[analysis_result, gr.Gallery(visible=False), gr.Textbox(visible=False)]
         ).then(
@@ -600,9 +664,10 @@ if __name__ == "__main__":
     print("🔥 啟動火煙誤判標註系統...")
     print("=" * 50)
     print("功能：")
-    print("✅ 影片上傳和自動分析")
+    print("✅ 多影片批次上傳和分析")
     print("✅ 使用 best.pt 進行火煙偵測")
     print("✅ ReID 技術自動分組事件")
+    print("✅ 統一標註流程處理多影片事件")
     print("✅ 快速標註真實/誤判")
     print("✅ 匯出結構化訓練資料集")
     print("=" * 50)
