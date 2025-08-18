@@ -15,6 +15,10 @@ import tempfile
 import os
 from collections import defaultdict
 import zipfile
+import threading
+import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 try:
     from ultralytics import YOLO
@@ -30,6 +34,14 @@ except ImportError:
     SUPERVISION_AVAILABLE = False
     print("⚠️  Supervision 未安裝，ReID 功能受限")
 
+try:
+    import psutil
+    import gc
+    MEMORY_MONITORING_AVAILABLE = True
+except ImportError:
+    MEMORY_MONITORING_AVAILABLE = False
+    print("⚠️  psutil 未安裝，記憶體監控功能受限")
+
 class VideoAnalyzer:
     def __init__(self):
         self.model_path = "best.pt"
@@ -38,23 +50,17 @@ class VideoAnalyzer:
         self.dataset_dir = Path("dataset")
         self.dataset_dir.mkdir(exist_ok=True)
         
-        # 初始化模型
-        if ULTRALYTICS_AVAILABLE and Path(self.model_path).exists():
-            import torch
-            # 檢查並使用 MPS
-            if torch.backends.mps.is_available():
-                device = 'mps'
-                print("✅ 使用 Mac MPS 加速")
-            else:
-                device = 'cpu'
-                print("ℹ️  使用 CPU 模式")
-            
-            self.model = YOLO(self.model_path)
-            self.model.to(device)
-            print(f"✅ 已載入 best.pt 模型到 {device}")
-        else:
-            self.model = None
-            print("⚠️  未找到 best.pt，將使用模擬偵測")
+        # 進度追蹤
+        self.progress_queue = queue.Queue()
+        self.analysis_status = {}
+        self.max_workers = min(4, os.cpu_count() or 1)  # 限制並發數
+        
+        # 檢測可用設備
+        self.available_devices = self._detect_available_devices()
+        self.current_device = self.available_devices['default']
+        
+        # 延遲模型載入，等待用戶選擇設備
+        self.model = None
         
         # 初始化追蹤器
         if SUPERVISION_AVAILABLE:
@@ -64,9 +70,89 @@ class VideoAnalyzer:
         
         self.current_events = []
         self.session_id = None
+        
+        # 記憶體管理
+        self._cleanup_old_sessions()
     
-    def analyze_videos(self, video_paths):
-        """分析多個影片，提取事件"""
+    def _detect_available_devices(self):
+        """檢測可用的計算設備"""
+        devices = {
+            'options': ['cpu'],
+            'default': 'cpu',
+            'status': {'cpu': '✅ 可用'}
+        }
+        
+        if ULTRALYTICS_AVAILABLE:
+            try:
+                import torch
+                
+                # 檢查 CUDA
+                if torch.cuda.is_available():
+                    devices['options'].insert(0, 'cuda')
+                    devices['default'] = 'cuda'
+                    device_name = torch.cuda.get_device_name()
+                    devices['status']['cuda'] = f'✅ 可用 ({device_name})'
+                    print(f"✅ 檢測到 CUDA: {device_name}")
+                else:
+                    devices['status']['cuda'] = '❌ 不可用'
+                
+                # 檢查 MPS (Apple Silicon)
+                if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                    if 'cuda' not in devices['options']:  # 如果沒有 CUDA，MPS 為優先
+                        devices['options'].insert(0, 'mps')
+                        devices['default'] = 'mps'
+                    else:
+                        devices['options'].insert(1, 'mps')
+                    devices['status']['mps'] = '✅ 可用 (Apple Silicon)'
+                    print("✅ 檢測到 MPS (Apple Silicon)")
+                else:
+                    devices['status']['mps'] = '❌ 不可用'
+                    
+            except Exception as e:
+                print(f"設備檢測錯誤: {e}")
+        
+        print(f"可用設備: {devices['options']}, 預設: {devices['default']}")
+        return devices
+    
+    def load_model(self, device='auto'):
+        """載入或重新載入模型到指定設備"""
+        if device == 'auto':
+            device = self.current_device
+        
+        try:
+            if ULTRALYTICS_AVAILABLE and Path(self.model_path).exists():
+                print(f"正在載入模型到 {device}...")
+                
+                # 釋放舊模型
+                if self.model is not None:
+                    del self.model
+                    if MEMORY_MONITORING_AVAILABLE:
+                        gc.collect()
+                
+                self.model = YOLO(self.model_path)
+                self.model.to(device)
+                self.current_device = device
+                print(f"✅ 已載入 best.pt 模型到 {device}")
+                return f"✅ 模型已載入到 {device}"
+            else:
+                self.model = None
+                print("⚠️  未找到 best.pt，將使用模擬偵測")
+                return "⚠️  未找到 best.pt，使用模擬偵測"
+        except Exception as e:
+            print(f"模型載入失敗: {e}")
+            # 回退到 CPU
+            if device != 'cpu':
+                print("嘗試回退到 CPU...")
+                return self.load_model('cpu')
+            else:
+                self.model = None
+                return f"❌ 模型載入失敗: {e}"
+        
+        # 記憶體管理
+        self._cleanup_old_sessions()
+    
+    def analyze_videos(self, video_paths, confidence_threshold=0.300, progress_callback=None):
+        """分析多個影片，提取事件（支援並發處理）"""
         try:
             if not video_paths:
                 return "請上傳影片檔案", [], ""
@@ -79,22 +165,56 @@ class VideoAnalyzer:
             session_dir = self.work_dir / self.session_id
             session_dir.mkdir(exist_ok=True)
             
+            # 初始化進度追蹤
+            self.analysis_status = {}
+            for i, path in enumerate(video_paths):
+                video_name = Path(path).name
+                self.analysis_status[i] = {
+                    'name': video_name,
+                    'status': '等待中',
+                    'progress': 0,
+                    'detections': 0
+                }
+            
             all_video_detections = []
             video_summaries = []
             
-            print(f"準備分析 {len(video_paths)} 個影片...")
+            print(f"準備並發分析 {len(video_paths)} 個影片（最多 {self.max_workers} 個並發）...")
             
-            # 處理每個影片
-            for video_idx, video_path in enumerate(video_paths):
-                video_name = Path(video_path).name
-                print(f"\n分析影片 {video_idx+1}/{len(video_paths)}: {video_name}")
+            if progress_callback:
+                progress_callback(self._format_progress_text())
+            
+            # 使用線程池並發處理
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # 提交所有任務
+                future_to_video = {
+                    executor.submit(self._analyze_single_video_with_progress, video_path, video_idx, Path(video_path).name, confidence_threshold, progress_callback): (video_idx, video_path)
+                    for video_idx, video_path in enumerate(video_paths)
+                }
                 
-                # 分析單個影片
-                video_detections, summary = self._analyze_single_video(video_path, video_idx, video_name)
-                video_summaries.append(summary)
-                all_video_detections.extend(video_detections)
+                # 收集結果
+                for future in as_completed(future_to_video):
+                    video_idx, video_path = future_to_video[future]
+                    try:
+                        video_detections, summary = future.result()
+                        video_summaries.append(summary)
+                        all_video_detections.extend(video_detections)
+                        
+                        # 更新狀態
+                        self.analysis_status[video_idx]['status'] = '完成'
+                        if progress_callback:
+                            progress_callback(self._format_progress_text())
+                            
+                    except Exception as e:
+                        print(f"分析影片 {Path(video_path).name} 時發生錯誤: {str(e)}")
+                        self.analysis_status[video_idx]['status'] = '錯誤'
+                        self.analysis_status[video_idx]['error'] = str(e)
+                        if progress_callback:
+                            progress_callback(self._format_progress_text())
             
             print(f"\n總共偵測到 {len(all_video_detections)} 個物件，開始分組...")
+            if progress_callback:
+                progress_callback(self._format_progress_text() + "\n\n🔄 正在分組事件...")
             
             # 按 ReID 分組事件
             events = self._group_detections_by_reid(all_video_detections, session_dir)
@@ -165,7 +285,7 @@ class VideoAnalyzer:
             # 採樣策略：每秒取一幀
             if frame_idx % sample_interval == 0:
                 timestamp = frame_idx / fps
-                detections = self._detect_objects(frame, frame_idx, timestamp)
+                detections = self._detect_objects(frame, frame_idx, timestamp, confidence_threshold)
                 if detections:
                     # 加上影片來源資訊
                     for det in detections:
@@ -176,8 +296,7 @@ class VideoAnalyzer:
             frame_idx += 1
             
             # 釋放記憶體
-            if frame_idx % 500 == 0:
-                import gc
+            if frame_idx % 500 == 0 and MEMORY_MONITORING_AVAILABLE:
                 gc.collect()
         
         cap.release()
@@ -190,12 +309,159 @@ class VideoAnalyzer:
         
         return video_detections, summary
     
-    def _detect_objects(self, frame, frame_idx, timestamp):
+    def _analyze_single_video_with_progress(self, video_path, video_idx, video_name, confidence_threshold, progress_callback):
+        """帶進度回饋的單個影片分析"""
+        try:
+            # 更新狀態為處理中
+            self.analysis_status[video_idx]['status'] = '處理中'
+            if progress_callback:
+                progress_callback(self._format_progress_text())
+            
+            # 打開影片
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                self.analysis_status[video_idx]['status'] = '錯誤'
+                self.analysis_status[video_idx]['error'] = '無法打開影片'
+                return [], {'name': video_name, 'detections': 0, 'duration': 0}
+            
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = total_frames / fps if fps > 0 else 0
+            
+            # 收集偵測結果
+            video_detections = []
+            frame_idx = 0
+            sample_interval = max(1, int(fps * 1.0))
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # 更新進度
+                progress_percent = int((frame_idx / total_frames) * 100) if total_frames > 0 else 0
+                self.analysis_status[video_idx]['progress'] = progress_percent
+                
+                # 每100幀或進度變化時更新介面
+                if frame_idx % 100 == 0 or progress_percent != self.analysis_status[video_idx].get('last_progress', -1):
+                    self.analysis_status[video_idx]['last_progress'] = progress_percent
+                    if progress_callback:
+                        progress_callback(self._format_progress_text())
+                
+                # 採樣策略：每秒取一幀
+                if frame_idx % sample_interval == 0:
+                    timestamp = frame_idx / fps
+                    detections = self._detect_objects(frame, frame_idx, timestamp, confidence_threshold)
+                    if detections:
+                        # 加上影片來源資訊
+                        for det in detections:
+                            det['video_name'] = video_name
+                            det['video_idx'] = video_idx
+                        video_detections.extend(detections)
+                        
+                        # 更新偵測數量
+                        self.analysis_status[video_idx]['detections'] = len(video_detections)
+                
+                frame_idx += 1
+                
+                # 釋放記憶體和優化
+                if frame_idx % 500 == 0:
+                    memory_usage = self._optimize_memory_usage()
+                    if frame_idx % 1000 == 0:  # 每1000幀顯示一次記憶體使用情況
+                        print(f"記憶體使用: {memory_usage:.1f} MB")
+            
+            cap.release()
+            
+            # 完成狀態
+            self.analysis_status[video_idx]['progress'] = 100
+            self.analysis_status[video_idx]['detections'] = len(video_detections)
+            
+            summary = {
+                'name': video_name,
+                'detections': len(video_detections),
+                'duration': duration
+            }
+            
+            return video_detections, summary
+            
+        except Exception as e:
+            self.analysis_status[video_idx]['status'] = '錯誤'
+            self.analysis_status[video_idx]['error'] = str(e)
+            if progress_callback:
+                progress_callback(self._format_progress_text())
+            raise e
+    
+    def _format_progress_text(self):
+        """格式化進度文字"""
+        lines = [f"📊 分析進度 ({len(self.analysis_status)} 個影片):"]
+        lines.append("")
+        
+        for idx, status in self.analysis_status.items():
+            name = status['name'][:30] + "..." if len(status['name']) > 30 else status['name']
+            
+            if status['status'] == '等待中':
+                lines.append(f"⏳ {name}: 等待中")
+            elif status['status'] == '處理中':
+                progress = status.get('progress', 0)
+                detections = status.get('detections', 0)
+                lines.append(f"🔄 {name}: {progress}% ({detections} 個偵測)")
+            elif status['status'] == '完成':
+                detections = status.get('detections', 0)
+                lines.append(f"✅ {name}: 完成 ({detections} 個偵測)")
+            elif status['status'] == '錯誤':
+                error = status.get('error', '未知錯誤')
+                lines.append(f"❌ {name}: 錯誤 - {error}")
+        
+        return "\n".join(lines)
+    
+    def _cleanup_old_sessions(self):
+        """清理舊的分析會話以節省磁碟空間"""
+        try:
+            if not self.work_dir.exists():
+                return
+                
+            import time
+            current_time = time.time()
+            
+            for session_path in self.work_dir.iterdir():
+                if session_path.is_dir():
+                    # 檢查資料夾修改時間，刪除超過1小時的舊會話
+                    if current_time - session_path.stat().st_mtime > 3600:  # 1小時
+                        import shutil
+                        shutil.rmtree(session_path, ignore_errors=True)
+                        print(f"清理舊會話: {session_path.name}")
+        except Exception as e:
+            print(f"清理舊會話時發生錯誤: {e}")
+    
+    def _optimize_memory_usage(self):
+        """優化記憶體使用"""
+        if not MEMORY_MONITORING_AVAILABLE:
+            return 0
+            
+        try:
+            # 強制垃圾回收
+            gc.collect()
+            
+            # 檢查記憶體使用情況
+            process = psutil.Process(os.getpid())
+            memory_usage = process.memory_info().rss / 1024 / 1024  # MB
+            
+            if memory_usage > 2000:  # 如果超過2GB
+                print(f"⚠️  記憶體使用量較高: {memory_usage:.1f} MB")
+                # 清理可能的大型變數
+                gc.collect()
+                
+            return memory_usage
+        except Exception as e:
+            print(f"記憶體監控錯誤: {e}")
+            return 0
+    
+    def _detect_objects(self, frame, frame_idx, timestamp, confidence_threshold=0.300):
         """在幀中偵測物件"""
         try:
             if self.model:
                 # 使用真實的 YOLO 模型（會自動使用已設定的 device）
-                results = self.model(frame, conf=0.3, verbose=False)
+                results = self.model(frame, conf=confidence_threshold, verbose=False)
                 detections = []
             
             for result in results:
@@ -352,8 +618,53 @@ class VideoAnalyzer:
             labeled_count = sum(1 for e in self.current_events if e['label'] is not None)
             total_count = len(self.current_events)
             
-            return f"事件 {event_idx+1} 已標註為：{label}   進度：{labeled_count}/{total_count}"
+            # 統計按影片分組的進度
+            video_progress = self._get_video_labeling_progress()
+            
+            # 構建詳細進度信息
+            progress_text = f"事件 {event_idx+1} 已標註為：{label}\n"
+            progress_text += f"總體進度：{labeled_count}/{total_count} ({labeled_count/total_count*100:.1f}%)\n"
+            progress_text += f"來源檔案：{event.get('video_name', 'unknown')}\n"
+            progress_text += video_progress
+            
+            return progress_text
         return "標註失敗"
+    
+    def _get_video_labeling_progress(self):
+        """獲取按影片分組的標註進度"""
+        video_stats = {}
+        
+        # 按影片統計事件
+        for i, event in enumerate(self.current_events):
+            video_name = event.get('video_name', 'unknown')
+            if video_name not in video_stats:
+                video_stats[video_name] = {'total': 0, 'labeled': 0, 'events': []}
+            
+            video_stats[video_name]['total'] += 1
+            video_stats[video_name]['events'].append(i)
+            
+            if event.get('label') is not None:
+                video_stats[video_name]['labeled'] += 1
+        
+        # 構建進度文本
+        progress_lines = []
+        completed_videos = 0
+        
+        for video_name, stats in video_stats.items():
+            labeled = stats['labeled']
+            total = stats['total']
+            percentage = (labeled / total * 100) if total > 0 else 0
+            
+            status = "✅ 完成" if labeled == total else f"📝 進行中"
+            if labeled == total:
+                completed_videos += 1
+                
+            progress_lines.append(f"  {status} {video_name}: {labeled}/{total} ({percentage:.0f}%)")
+        
+        total_videos = len(video_stats)
+        summary = f"影片進度：{completed_videos}/{total_videos} 個檔案完成\n"
+        
+        return summary + "\n".join(progress_lines)
     
     def export_dataset(self):
         """匯出標註好的資料集"""
@@ -448,6 +759,29 @@ def create_interface():
         current_event_idx = gr.State(0)
         frame_idx = gr.State(0)
         
+        # 為 analyzer 添加進度追蹤屬性
+        analyzer.current_progress = ""
+        analyzer.analysis_complete = False
+        analyzer.analysis_result = None
+        analyzer.analysis_error = None
+        
+        # 載入模型到指定設備
+        def load_model_to_device(device):
+            status_message = analyzer.load_model(device)
+            
+            # 同時顯示設備可用性信息
+            device_info = []
+            for dev in ['cuda', 'mps', 'cpu']:
+                if dev in analyzer.available_devices['status']:
+                    status = analyzer.available_devices['status'][dev]
+                    device_info.append(f"{dev.upper()}: {status}")
+            
+            full_status = f"{status_message}\n\n設備狀態:\n" + "\n".join(device_info)
+            return full_status
+        
+        # 初始載入模型到預設設備
+        initial_status = load_model_to_device(analyzer.available_devices['default'])
+        
         with gr.Row():
             with gr.Column(scale=1):
                 video_input = gr.File(
@@ -455,17 +789,53 @@ def create_interface():
                     file_count="multiple",
                     file_types=[".mp4", ".mov", ".avi", ".mkv", ".webm"]
                 )
+                
+                confidence_slider = gr.Slider(
+                    minimum=0.001,
+                    maximum=1.0,
+                    value=0.300,
+                    step=0.001,
+                    label="🎯 偵測信心度閾值",
+                    info="調整YOLO模型的偵測閾值，數值越低偵測越敏感"
+                )
+                
+                with gr.Row():
+                    device_dropdown = gr.Dropdown(
+                        choices=analyzer.available_devices['options'],
+                        value=analyzer.available_devices['default'],
+                        label="⚡ 計算設備",
+                        info="選擇模型運行設備"
+                    )
+                    load_model_btn = gr.Button("🔄 載入模型", variant="secondary", size="sm")
+                
+                model_status = gr.Textbox(
+                    label="📊 模型狀態",
+                    value=initial_status,
+                    lines=4,
+                    interactive=False
+                )
+                
                 analyze_btn = gr.Button("🔍 開始分析", variant="primary")
+                
+                # 即時進度顯示
+                progress_display = gr.Textbox(
+                    label="📊 即時分析進度",
+                    lines=8,
+                    placeholder="等待上傳影片檔案...",
+                    interactive=False,
+                    max_lines=15
+                )
                 
                 analysis_result = gr.Textbox(
                     label="分析結果",
-                    lines=10,
-                    placeholder="上傳影片檔案（支援多個檔案）並點擊分析按鈕"
+                    lines=6,
+                    placeholder="分析完成後顯示結果",
+                    interactive=False
                 )
                 
             with gr.Column(scale=2):
                 # 當前事件顯示區
-                gr.Markdown("## 🎯 當前事件")
+                gr.Markdown("## 🎯 當前事件 & 快速標註")
                 current_event_info = gr.Textbox(
                     label="事件資訊",
                     lines=2,
@@ -488,26 +858,29 @@ def create_interface():
                         height=400,
                         scale=1
                     )
-        
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown("## 📝 快速標註")
+                
+                # 標註進度顯示
                 progress_info = gr.Textbox(
-                    label="標註進度",
+                    label="📊 標註進度",
                     value="等待分析完成...",
-                    lines=2,
+                    lines=3,
                     interactive=False
                 )
                 
+                # 快速標註按鈕
+                gr.Markdown("### 🏷️ 快速標註")
                 with gr.Row():
-                    label_true_btn = gr.Button("✅ 真實火煙", variant="primary", scale=1)
-                    label_false_btn = gr.Button("❌ 誤判", variant="secondary", scale=1)
+                    label_true_btn = gr.Button("✅ 真實火煙", variant="primary", scale=2, size="lg")
+                    label_false_btn = gr.Button("❌ 誤判", variant="secondary", scale=2, size="lg")
                 
+                # 導航按鈕
                 with gr.Row():
                     prev_btn = gr.Button("⬅️ 上一個", scale=1)
                     next_btn = gr.Button("➡️ 下一個", scale=1)
                     skip_btn = gr.Button("⏭️ 跳過", scale=1)
-                
+        
+        # 匯出資料集區域
+        with gr.Row():
             with gr.Column():
                 gr.Markdown("## 📦 匯出資料集")
                 export_btn = gr.Button("💾 匯出標註資料集", variant="secondary")
@@ -516,6 +889,9 @@ def create_interface():
         
         # 自動輪播計時器
         timer = gr.Timer(value=0.5, active=False)
+        
+        # 進度更新計時器  
+        progress_timer = gr.Timer(value=1.0, active=False)
         
         # 更新當前事件顯示
         def update_event_display(event_idx, frame_idx):
@@ -546,9 +922,14 @@ def create_interface():
                 if event['label']:
                     info_text += f" | 已標註: {event['label']}"
                 
-                # 進度資訊
+                # 詳細進度資訊
                 labeled_count = sum(1 for e in analyzer.current_events if e['label'] is not None)
-                progress_text = f"進度: {labeled_count}/{len(analyzer.current_events)} 已標註"
+                total_count = len(analyzer.current_events)
+                video_progress = analyzer._get_video_labeling_progress()
+                
+                progress_text = f"總體進度: {labeled_count}/{total_count} ({labeled_count/total_count*100:.1f}%)\n"
+                progress_text += f"當前事件來源: {event.get('video_name', 'unknown')}\n"
+                progress_text += video_progress
                 
                 # 返回完整畫面和裁切區域
                 full_path = frame_info.get('full_path', frame_info['image_path'])
@@ -562,8 +943,8 @@ def create_interface():
         # 標註並移到下一個
         def label_and_next(event_idx, label):
             if 0 <= event_idx < len(analyzer.current_events):
-                analyzer.current_events[event_idx]['label'] = label
-                analyzer.current_events[event_idx]['labeled_at'] = datetime.now().isoformat()
+                # 使用analyzer的label_event方法獲取詳細進度
+                progress_message = analyzer.label_event(event_idx, label)
                 
                 # 找下一個未標註的事件
                 next_idx = event_idx + 1
@@ -581,8 +962,8 @@ def create_interface():
                     else:
                         next_idx = 0  # 全部都標註完了
                 
-                return next_idx, 0
-            return event_idx, 0
+                return next_idx, 0, progress_message
+            return event_idx, 0, "標註失敗"
         
         # 導航函數
         def go_prev(event_idx):
@@ -594,33 +975,97 @@ def create_interface():
             return new_idx, 0
         
         def skip_current(event_idx):
-            return label_and_next(event_idx, None)[0], 0
+            # 跳過當前事件，移到下一個
+            new_idx = min(len(analyzer.current_events) - 1, event_idx + 1) if analyzer.current_events else 0
+            return new_idx, 0
         
-        # 處理上傳的檔案
-        def process_uploaded_files(files):
-            if not files:
-                return "請上傳影片檔案", [], ""
+        # 進度更新函數
+        def update_progress():
+            """更新分析進度"""
+            if hasattr(analyzer, 'current_progress') and analyzer.current_progress:
+                progress_text = analyzer.current_progress
+            else:
+                progress_text = "等待上傳影片檔案..."
             
-            # 提取檔案路徑
+            return progress_text
+        
+        # 檢查分析完成狀態
+        def check_analysis_complete():
+            """檢查分析是否完成並返回結果"""
+            if hasattr(analyzer, 'analysis_complete') and analyzer.analysis_complete:
+                if hasattr(analyzer, 'analysis_error') and analyzer.analysis_error:
+                    return f"❌ 分析失敗: {analyzer.analysis_error}", [], "", gr.Timer(active=False), 0, 0, gr.Timer(active=False)
+                elif hasattr(analyzer, 'analysis_result') and analyzer.analysis_result:
+                    result_text, event_gallery, status = analyzer.analysis_result
+                    # 重置完成狀態
+                    analyzer.analysis_complete = False
+                    analyzer.analysis_result = None
+                    # 啟動輪播計時器
+                    return result_text, event_gallery, status, gr.Timer(active=False), 0, 0, gr.Timer(active=True) if analyzer.current_events else gr.Timer(active=False)
+            
+            # 如果還沒完成，保持進度計時器運行
+            return gr.update(), gr.update(), gr.update(), gr.Timer(active=True), gr.update(), gr.update(), gr.update()
+        
+        # 非阻塞的分析處理
+        def start_analysis(files, confidence):
+            if not files:
+                return "請上傳影片檔案", gr.Timer(active=False)
+            
+            # 檢查模型是否已載入
+            if analyzer.model is None and ULTRALYTICS_AVAILABLE and Path(analyzer.model_path).exists():
+                return "⚠️  請先載入模型再開始分析", gr.Timer(active=False)
+            
             video_paths = [file.name for file in files] if isinstance(files, list) else [files.name]
-            return analyzer.analyze_videos(video_paths)
+            
+            # 啟動後台分析任務
+            def analysis_worker():
+                def progress_callback(progress_text):
+                    analyzer.current_progress = progress_text
+                
+                try:
+                    result = analyzer.analyze_videos(video_paths, confidence, progress_callback)
+                    analyzer.analysis_result = result
+                    analyzer.analysis_complete = True
+                except Exception as e:
+                    analyzer.analysis_error = str(e)
+                    analyzer.analysis_complete = True
+            
+            # 重置狀態
+            analyzer.analysis_complete = False
+            analyzer.analysis_error = None
+            analyzer.current_progress = "🚀 準備分析影片..."
+            
+            # 啟動背景任務
+            thread = threading.Thread(target=analysis_worker)
+            thread.daemon = True
+            thread.start()
+            
+            return "🚀 開始分析影片，請查看即時進度...", gr.Timer(active=True)
         
-        # 分析影片完成後的處理
-        def on_analysis_complete(result, gallery, status):
-            if analyzer.current_events:
-                # 啟動計時器開始輪播
-                return result, 0, 0, gr.Timer(active=True)
-            return result, 0, 0, gr.Timer(active=False)
+        # 載入模型按鈕點擊
+        load_model_btn.click(
+            load_model_to_device,
+            inputs=[device_dropdown],
+            outputs=[model_status]
+        )
         
-        # 分析影片
+        # 分析影片按鈕點擊
         analyze_btn.click(
-            process_uploaded_files,
-            inputs=[video_input],
-            outputs=[analysis_result, gr.Gallery(visible=False), gr.Textbox(visible=False)]
-        ).then(
-            on_analysis_complete,
-            inputs=[analysis_result, gr.Gallery(visible=False), gr.Textbox(visible=False)],
-            outputs=[analysis_result, current_event_idx, frame_idx, timer]
+            start_analysis,
+            inputs=[video_input, confidence_slider],
+            outputs=[analysis_result, progress_timer]
+        )
+        
+        # 進度計時器更新
+        progress_timer.tick(
+            update_progress,
+            outputs=[progress_display]
+        )
+        
+        # 同時檢查分析完成狀態
+        progress_timer.tick(
+            check_analysis_complete,
+            outputs=[analysis_result, gr.Gallery(visible=False), gr.Textbox(visible=False), progress_timer, current_event_idx, frame_idx, timer]
         )
         
         # 計時器觸發更新
@@ -634,13 +1079,13 @@ def create_interface():
         label_true_btn.click(
             lambda idx: label_and_next(idx, "真實火煙"),
             inputs=[current_event_idx],
-            outputs=[current_event_idx, frame_idx]
+            outputs=[current_event_idx, frame_idx, analysis_result]
         )
         
         label_false_btn.click(
             lambda idx: label_and_next(idx, "誤判"),
             inputs=[current_event_idx],
-            outputs=[current_event_idx, frame_idx]
+            outputs=[current_event_idx, frame_idx, analysis_result]
         )
         
         # 導航按鈕
