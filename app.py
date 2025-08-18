@@ -177,7 +177,8 @@ class VideoAnalyzer:
                                 'class': int(cls),
                                 'frame_idx': frame_idx,
                                 'timestamp': timestamp,
-                                'crop': crop
+                                'crop': crop,
+                                'full_frame': frame.copy()  # 保存完整畫面
                             })
                 return detections
             else:
@@ -193,7 +194,8 @@ class VideoAnalyzer:
                         'class': 0,
                         'frame_idx': frame_idx,
                         'timestamp': timestamp,
-                        'crop': crop
+                        'crop': crop,
+                        'full_frame': frame.copy()
                     }]
                 return []
         except Exception as e:
@@ -252,12 +254,28 @@ class VideoAnalyzer:
                     
                     frames = []
                     for i, det in enumerate(group_dets):
-                        frame_path = event_dir / f"frame_{i:03d}_{det['timestamp']:.1f}s.jpg"
-                        cv2.imwrite(str(frame_path), det['crop'])
+                        # 保存裁切圖片
+                        crop_path = event_dir / f"crop_{i:03d}_{det['timestamp']:.1f}s.jpg"
+                        cv2.imwrite(str(crop_path), det['crop'])
+                        
+                        # 在完整畫面上繪製框線
+                        full_frame = det['full_frame'].copy()
+                        x1, y1, x2, y2 = [int(v) for v in det['bbox']]
+                        cv2.rectangle(full_frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                        cv2.putText(full_frame, f"Conf: {det['confidence']:.2f}", 
+                                   (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                        
+                        # 保存帶框線的完整畫面
+                        full_path = event_dir / f"full_{i:03d}_{det['timestamp']:.1f}s.jpg"
+                        cv2.imwrite(str(full_path), full_frame)
+                        
                         frames.append({
-                            'image_path': str(frame_path),
+                            'crop_path': str(crop_path),
+                            'full_path': str(full_path),
+                            'image_path': str(crop_path),  # 保持相容性
                             'timestamp': det['timestamp'],
-                            'confidence': det['confidence']
+                            'confidence': det['confidence'],
+                            'bbox': det['bbox']
                         })
                     
                     event = {
@@ -405,12 +423,22 @@ def create_interface():
                     interactive=False
                 )
                 
-                # 輪播圖片顯示
-                current_frame_display = gr.Image(
-                    label="事件幀輪播",
-                    type="filepath",
-                    height=400
-                )
+                with gr.Row():
+                    # 左邊：完整畫面與框線
+                    full_frame_display = gr.Image(
+                        label="完整畫面（含偵測框線）",
+                        type="filepath",
+                        height=400,
+                        scale=2
+                    )
+                    
+                    # 右邊：裁切區域輪播
+                    crop_frame_display = gr.Image(
+                        label="事件區域（放大檢視）",
+                        type="filepath",
+                        height=400,
+                        scale=1
+                    )
         
         with gr.Row():
             with gr.Column():
@@ -444,11 +472,11 @@ def create_interface():
         def update_event_display(event_idx, frame_idx):
             try:
                 if not analyzer.current_events or event_idx >= len(analyzer.current_events):
-                    return "無事件", None, f"進度: 0/0", event_idx, 0
+                    return "無事件", None, None, f"進度: 0/0", event_idx, 0
                 
                 event = analyzer.current_events[event_idx]
                 if not event['frames']:
-                    return "無幀資料", None, f"進度: {event_idx+1}/{len(analyzer.current_events)}", event_idx, 0
+                    return "無幀資料", None, None, f"進度: {event_idx+1}/{len(analyzer.current_events)}", event_idx, 0
                 
                 # 循環顯示幀
                 frame_idx = frame_idx % len(event['frames'])
@@ -467,10 +495,14 @@ def create_interface():
                 labeled_count = sum(1 for e in analyzer.current_events if e['label'] is not None)
                 progress_text = f"進度: {labeled_count}/{len(analyzer.current_events)} 已標註"
                 
-                return info_text, frame_info['image_path'], progress_text, event_idx, (frame_idx + 1)
+                # 返回完整畫面和裁切區域
+                full_path = frame_info.get('full_path', frame_info['image_path'])
+                crop_path = frame_info.get('crop_path', frame_info['image_path'])
+                
+                return info_text, full_path, crop_path, progress_text, event_idx, (frame_idx + 1)
             except Exception as e:
                 print(f"更新事件顯示時發生錯誤: {str(e)}")
-                return "錯誤", None, "錯誤", 0, 0
+                return "錯誤", None, None, "錯誤", 0, 0
         
         # 標註並移到下一個
         def label_and_next(event_idx, label):
@@ -531,7 +563,7 @@ def create_interface():
         timer.tick(
             update_event_display,
             inputs=[current_event_idx, frame_idx],
-            outputs=[current_event_info, current_frame_display, progress_info, current_event_idx, frame_idx]
+            outputs=[current_event_info, full_frame_display, crop_frame_display, progress_info, current_event_idx, frame_idx]
         )
         
         # 標註事件
