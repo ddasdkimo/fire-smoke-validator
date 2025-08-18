@@ -463,26 +463,26 @@ class VideoAnalyzer:
                 # 使用真實的 YOLO 模型（會自動使用已設定的 device）
                 results = self.model(frame, conf=confidence_threshold, verbose=False)
                 detections = []
-            
-            for result in results:
-                if result.boxes is not None:
-                    for box in result.boxes:
-                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                        conf = box.conf[0].cpu().numpy()
-                        cls = int(box.cls[0].cpu().numpy())
-                        
-                        # 裁切檢測區域
-                        crop = frame[int(y1):int(y2), int(x1):int(x2)]
-                        if crop.size > 0:
-                            detections.append({
-                                'bbox': [float(x1), float(y1), float(x2), float(y2)],
-                                'confidence': float(conf),
-                                'class': int(cls),
-                                'frame_idx': frame_idx,
-                                'timestamp': timestamp,
-                                'crop': crop,
-                                'full_frame': frame.copy()  # 保存完整畫面
-                            })
+                
+                for result in results:
+                    if result.boxes is not None:
+                        for box in result.boxes:
+                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                            conf = box.conf[0].cpu().numpy()
+                            cls = int(box.cls[0].cpu().numpy())
+                            
+                            # 裁切檢測區域
+                            crop = frame[int(y1):int(y2), int(x1):int(x2)]
+                            if crop.size > 0:
+                                detections.append({
+                                    'bbox': [float(x1), float(y1), float(x2), float(y2)],
+                                    'confidence': float(conf),
+                                    'class': int(cls),
+                                    'frame_idx': frame_idx,
+                                    'timestamp': timestamp,
+                                    'crop': crop,
+                                    'full_frame': frame.copy()  # 保存完整畫面
+                                })
                 return detections
             else:
                 # 模擬偵測（用於測試）
@@ -879,6 +879,16 @@ def create_interface():
                     next_btn = gr.Button("➡️ 下一個", scale=1)
                     skip_btn = gr.Button("⏭️ 跳過", scale=1)
         
+        # 幀資訊顯示
+        with gr.Row():
+            with gr.Column():
+                frame_info_display = gr.Textbox(
+                    label="📸 幀播放資訊",
+                    lines=1,
+                    interactive=False,
+                    placeholder="等待事件載入..."
+                )
+        
         # 匯出資料集區域
         with gr.Row():
             with gr.Column():
@@ -888,7 +898,7 @@ def create_interface():
                 export_file = gr.File(label="下載資料集")
         
         # 自動輪播計時器
-        timer = gr.Timer(value=0.5, active=False)
+        timer = gr.Timer(value=1.0, active=False)
         
         # 進度更新計時器  
         progress_timer = gr.Timer(value=1.0, active=False)
@@ -897,11 +907,11 @@ def create_interface():
         def update_event_display(event_idx, frame_idx):
             try:
                 if not analyzer.current_events or event_idx >= len(analyzer.current_events):
-                    return "無事件", None, None, f"進度: 0/0", event_idx, 0
+                    return "無事件", None, None, f"進度: 0/0", "等待事件載入...", event_idx, 0
                 
                 event = analyzer.current_events[event_idx]
                 if not event['frames']:
-                    return "無幀資料", None, None, f"進度: {event_idx+1}/{len(analyzer.current_events)}", event_idx, 0
+                    return "無幀資料", None, None, f"進度: {event_idx+1}/{len(analyzer.current_events)}", "無幀資料", event_idx, 0
                 
                 # 循環顯示幀
                 frame_idx = frame_idx % len(event['frames'])
@@ -931,14 +941,19 @@ def create_interface():
                 progress_text += f"當前事件來源: {event.get('video_name', 'unknown')}\n"
                 progress_text += video_progress
                 
+                # 幀播放資訊
+                frame_info_text = f"第 {frame_idx + 1} 幀 / 共 {len(event['frames'])} 幀 | " \
+                                f"時間: {frame_info['timestamp']:.1f}s | " \
+                                f"信心度: {frame_info['confidence']:.3f}"
+                
                 # 返回完整畫面和裁切區域
                 full_path = frame_info.get('full_path', frame_info['image_path'])
                 crop_path = frame_info.get('crop_path', frame_info['image_path'])
                 
-                return info_text, full_path, crop_path, progress_text, event_idx, (frame_idx + 1)
+                return info_text, full_path, crop_path, progress_text, frame_info_text, event_idx, (frame_idx + 1)
             except Exception as e:
                 print(f"更新事件顯示時發生錯誤: {str(e)}")
-                return "錯誤", None, None, "錯誤", 0, 0
+                return "錯誤", None, None, "錯誤", "錯誤", 0, 0
         
         # 標註並移到下一個
         def label_and_next(event_idx, label):
@@ -1072,7 +1087,7 @@ def create_interface():
         timer.tick(
             update_event_display,
             inputs=[current_event_idx, frame_idx],
-            outputs=[current_event_info, full_frame_display, crop_frame_display, progress_info, current_event_idx, frame_idx]
+            outputs=[current_event_info, full_frame_display, crop_frame_display, progress_info, frame_info_display, current_event_idx, frame_idx]
         )
         
         # 標註事件
