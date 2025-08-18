@@ -879,14 +879,23 @@ def create_interface():
                     next_btn = gr.Button("➡️ 下一個", scale=1)
                     skip_btn = gr.Button("⏭️ 跳過", scale=1)
         
-        # 幀資訊顯示
+        # 播放控制和幀資訊顯示
         with gr.Row():
-            with gr.Column():
+            with gr.Column(scale=3):
                 frame_info_display = gr.Textbox(
                     label="📸 幀播放資訊",
                     lines=1,
                     interactive=False,
                     placeholder="等待事件載入..."
+                )
+            with gr.Column(scale=2):
+                playback_speed = gr.Slider(
+                    minimum=0.1,
+                    maximum=5.0,
+                    value=1.0,
+                    step=0.1,
+                    label="⚡ 播放速度",
+                    info="調整幀切換速度（倍數）"
                 )
         
         # 匯出資料集區域
@@ -897,11 +906,27 @@ def create_interface():
                 export_result = gr.Textbox(label="匯出結果", lines=3)
                 export_file = gr.File(label="下載資料集")
         
-        # 自動輪播計時器
+        # 自動輪播計時器（初始值1.0秒，會根據播放速度動態調整）
         timer = gr.Timer(value=1.0, active=False)
         
         # 進度更新計時器  
         progress_timer = gr.Timer(value=1.0, active=False)
+        
+        # 播放速度狀態
+        current_speed = gr.State(1.0)
+        
+        # 更新播放速度
+        def update_playback_speed(speed):
+            """根據播放速度調整計時器間隔"""
+            # 基礎間隔是1.0秒，速度越快間隔越短
+            base_interval = 1.0
+            new_interval = base_interval / speed
+            # 限制間隔範圍在0.2秒到10秒之間
+            new_interval = max(0.2, min(10.0, new_interval))
+            
+            # 檢查計時器是否活躍，如果是則更新間隔並保持活躍狀態
+            is_active = analyzer.current_events and len(analyzer.current_events) > 0
+            return gr.Timer(value=new_interval, active=is_active), speed
         
         # 更新當前事件顯示
         def update_event_display(event_idx, frame_idx):
@@ -1005,7 +1030,7 @@ def create_interface():
             return progress_text
         
         # 檢查分析完成狀態
-        def check_analysis_complete():
+        def check_analysis_complete(current_speed_val):
             """檢查分析是否完成並返回結果"""
             if hasattr(analyzer, 'analysis_complete') and analyzer.analysis_complete:
                 if hasattr(analyzer, 'analysis_error') and analyzer.analysis_error:
@@ -1015,8 +1040,15 @@ def create_interface():
                     # 重置完成狀態
                     analyzer.analysis_complete = False
                     analyzer.analysis_result = None
-                    # 啟動輪播計時器
-                    return result_text, event_gallery, status, gr.Timer(active=False), 0, 0, gr.Timer(active=True) if analyzer.current_events else gr.Timer(active=False)
+                    
+                    # 啟動輪播計時器，根據播放速度設定間隔
+                    if analyzer.current_events:
+                        base_interval = 1.0
+                        new_interval = base_interval / current_speed_val
+                        new_interval = max(0.2, min(10.0, new_interval))
+                        return result_text, event_gallery, status, gr.Timer(active=False), 0, 0, gr.Timer(value=new_interval, active=True)
+                    else:
+                        return result_text, event_gallery, status, gr.Timer(active=False), 0, 0, gr.Timer(active=False)
             
             # 如果還沒完成，保持進度計時器運行
             return gr.update(), gr.update(), gr.update(), gr.Timer(active=True), gr.update(), gr.update(), gr.update()
@@ -1080,6 +1112,7 @@ def create_interface():
         # 同時檢查分析完成狀態
         progress_timer.tick(
             check_analysis_complete,
+            inputs=[current_speed],
             outputs=[analysis_result, gr.Gallery(visible=False), gr.Textbox(visible=False), progress_timer, current_event_idx, frame_idx, timer]
         )
         
@@ -1107,6 +1140,13 @@ def create_interface():
         prev_btn.click(go_prev, inputs=[current_event_idx], outputs=[current_event_idx, frame_idx])
         next_btn.click(go_next, inputs=[current_event_idx], outputs=[current_event_idx, frame_idx])
         skip_btn.click(skip_current, inputs=[current_event_idx], outputs=[current_event_idx, frame_idx])
+        
+        # 播放速度控制
+        playback_speed.change(
+            update_playback_speed,
+            inputs=[playback_speed],
+            outputs=[timer, current_speed]
+        )
         
         # 匯出資料集
         def export_and_return_file():
