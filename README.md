@@ -22,8 +22,8 @@
 
 1. Clone 專案
 ```bash
-git clone [your-repo-url]
-cd temporal_classification_model
+git clone https://github.com/davidyang/fire-smoke-validator.git
+cd fire-smoke-validator
 ```
 
 2. 安裝依賴套件
