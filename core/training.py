@@ -46,42 +46,114 @@ class ModelTrainer:
         self.training_progress = ""
         self.training_results = None
     
-    def upload_and_extract_dataset(self, zip_file):
-        """上傳並解壓標註資料集"""
+    def upload_and_extract_dataset(self, zip_files):
+        """上傳並解壓多個標註資料集"""
         try:
-            if not zip_file:
+            if not zip_files:
                 return "請選擇標註資料集ZIP檔案"
             
-            # 建立新的資料集目錄
+            # 確保是列表格式
+            if not isinstance(zip_files, list):
+                zip_files = [zip_files]
+            
+            # 建立新的合併資料集目錄
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            dataset_dir = self.training_dir / f"dataset_{timestamp}"
-            dataset_dir.mkdir(exist_ok=True)
+            merged_dataset_dir = self.training_dir / f"merged_dataset_{timestamp}"
+            merged_dataset_dir.mkdir(exist_ok=True)
             
-            # 解壓檔案
-            with zipfile.ZipFile(zip_file.name, 'r') as zip_ref:
-                zip_ref.extractall(dataset_dir)
+            # 建立合併目錄結構
+            merged_true_positive_dir = merged_dataset_dir / "true_positive"
+            merged_false_positive_dir = merged_dataset_dir / "false_positive"
+            merged_true_positive_dir.mkdir(exist_ok=True)
+            merged_false_positive_dir.mkdir(exist_ok=True)
             
-            # 驗證資料集結構
-            validation_result = self._validate_dataset_structure(dataset_dir)
-            if not validation_result["valid"]:
-                shutil.rmtree(dataset_dir)
-                return f"❌ 資料集格式錯誤: {validation_result['error']}"
+            total_stats = {
+                "true_positive": 0,
+                "false_positive": 0,
+                "total_images": 0,
+                "processed_files": 0,
+                "failed_files": []
+            }
+            
+            # 處理每個ZIP檔案
+            for i, zip_file in enumerate(zip_files):
+                try:
+                    print(f"處理第 {i+1}/{len(zip_files)} 個ZIP檔案: {Path(zip_file.name).name}")
+                    
+                    # 建立臨時解壓目錄
+                    temp_extract_dir = merged_dataset_dir / f"temp_extract_{i}"
+                    temp_extract_dir.mkdir(exist_ok=True)
+                    
+                    # 解壓檔案
+                    with zipfile.ZipFile(zip_file.name, 'r') as zip_ref:
+                        zip_ref.extractall(temp_extract_dir)
+                    
+                    # 驗證資料集結構
+                    validation_result = self._validate_dataset_structure(temp_extract_dir)
+                    if not validation_result["valid"]:
+                        total_stats["failed_files"].append({
+                            "filename": Path(zip_file.name).name,
+                            "error": validation_result["error"]
+                        })
+                        shutil.rmtree(temp_extract_dir)
+                        continue
+                    
+                    # 合併到主資料集
+                    self._merge_dataset_to_main(temp_extract_dir, merged_dataset_dir, i)
+                    
+                    # 累計統計
+                    total_stats["true_positive"] += validation_result["stats"]["true_positive"]
+                    total_stats["false_positive"] += validation_result["stats"]["false_positive"]
+                    total_stats["total_images"] += validation_result["stats"]["total_images"]
+                    total_stats["processed_files"] += 1
+                    
+                    # 清理臨時目錄
+                    shutil.rmtree(temp_extract_dir)
+                    
+                except Exception as e:
+                    total_stats["failed_files"].append({
+                        "filename": Path(zip_file.name).name,
+                        "error": str(e)
+                    })
+                    # 清理可能的臨時目錄
+                    temp_dir = merged_dataset_dir / f"temp_extract_{i}"
+                    if temp_dir.exists():
+                        shutil.rmtree(temp_dir)
+            
+            # 檢查是否有成功處理的檔案
+            if total_stats["processed_files"] == 0:
+                shutil.rmtree(merged_dataset_dir)
+                error_details = "\n".join([f"- {f['filename']}: {f['error']}" for f in total_stats["failed_files"]])
+                return f"❌ 所有檔案處理失敗:\n\n{error_details}"
             
             # 轉換為YOLO格式
-            yolo_dataset_dir = self._convert_to_yolo_format(dataset_dir, validation_result["stats"])
+            yolo_dataset_dir = self._convert_to_yolo_format(merged_dataset_dir, total_stats)
             
-            return f"""✅ 資料集上傳成功！
+            # 生成結果報告
+            result_text = f"""✅ 多資料集合併成功！
             
-📊 資料集統計:
-- 真實火煙事件: {validation_result['stats']['true_positive']} 個
-- 誤判事件: {validation_result['stats']['false_positive']} 個  
-- 總影像數: {validation_result['stats']['total_images']} 張
+📊 處理結果:
+- 成功處理: {total_stats['processed_files']} 個ZIP檔案
+- 失敗檔案: {len(total_stats['failed_files'])} 個
 
-📁 資料集路徑: {yolo_dataset_dir}
+📈 合併後統計:
+- 真實火煙事件: {total_stats['true_positive']} 個
+- 誤判事件: {total_stats['false_positive']} 個  
+- 總影像數: {total_stats['total_images']} 張
+
+📁 YOLO資料集路徑: {yolo_dataset_dir}
             """
             
+            # 如果有失敗檔案，添加詳細信息
+            if total_stats["failed_files"]:
+                result_text += "\n\n⚠️ 失敗檔案詳情:\n"
+                for failed in total_stats["failed_files"]:
+                    result_text += f"- {failed['filename']}: {failed['error']}\n"
+            
+            return result_text
+            
         except Exception as e:
-            return f"❌ 上傳失敗: {str(e)}"
+            return f"❌ 資料集處理失敗: {str(e)}"
     
     def _validate_dataset_structure(self, dataset_dir):
         """驗證資料集結構"""
@@ -115,6 +187,36 @@ class ModelTrainer:
             
         except Exception as e:
             return {"valid": False, "error": str(e)}
+    
+    def _merge_dataset_to_main(self, source_dataset_dir, target_dataset_dir, dataset_index):
+        """將單個資料集合併到主資料集"""
+        try:
+            source_true_dir = source_dataset_dir / "true_positive"
+            source_false_dir = source_dataset_dir / "false_positive"
+            target_true_dir = target_dataset_dir / "true_positive"
+            target_false_dir = target_dataset_dir / "false_positive"
+            
+            # 合併 true_positive 事件
+            if source_true_dir.exists():
+                for event_dir in source_true_dir.iterdir():
+                    if event_dir.is_dir():
+                        # 重命名事件目錄避免衝突
+                        new_event_name = f"dataset_{dataset_index}_{event_dir.name}"
+                        target_event_dir = target_true_dir / new_event_name
+                        shutil.copytree(event_dir, target_event_dir)
+            
+            # 合併 false_positive 事件
+            if source_false_dir.exists():
+                for event_dir in source_false_dir.iterdir():
+                    if event_dir.is_dir():
+                        # 重命名事件目錄避免衝突
+                        new_event_name = f"dataset_{dataset_index}_{event_dir.name}"
+                        target_event_dir = target_false_dir / new_event_name
+                        shutil.copytree(event_dir, target_event_dir)
+                        
+        except Exception as e:
+            print(f"合併資料集時發生錯誤: {e}")
+            raise e
     
     def _convert_to_yolo_format(self, dataset_dir, stats):
         """轉換為YOLO訓練格式"""

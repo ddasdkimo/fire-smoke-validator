@@ -246,13 +246,21 @@ def create_training_tab(training_controller):
         with gr.Column(scale=1):
             # 資料集上傳
             gr.Markdown("### 📁 資料集準備")
+            gr.Markdown("""
+**支援多資料集合併：**
+- 可同時上傳多個標註資料集ZIP檔案
+- 系統會自動合併所有資料集
+- 每個ZIP應包含 `true_positive` 和 `false_positive` 資料夾
+- 合併後轉換為統一的YOLO訓練格式
+            """)
             dataset_upload = gr.File(
-                label="上傳標註資料集（ZIP檔案）",
+                label="上傳標註資料集（支援多個ZIP檔案）",
+                file_count="multiple",
                 file_types=[".zip"],
                 type="filepath"
             )
             
-            upload_btn = gr.Button("📤 上傳並解析資料集", variant="secondary")
+            upload_btn = gr.Button("📤 上傳並合併多個資料集", variant="secondary")
             upload_result = gr.Textbox(
                 label="上傳結果",
                 lines=6,

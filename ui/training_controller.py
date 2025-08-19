@@ -15,10 +15,10 @@ class TrainingController:
     def __init__(self, trainer):
         self.trainer = trainer
     
-    def upload_and_extract_dataset(self, zip_file):
-        """上傳並解析資料集"""
+    def upload_and_extract_dataset(self, zip_files):
+        """上傳並解析多個資料集"""
         try:
-            result = self.trainer.upload_and_extract_dataset(zip_file)
+            result = self.trainer.upload_and_extract_dataset(zip_files)
             return result
         except Exception as e:
             return f"❌ 上傳失敗: {str(e)}"
