@@ -54,6 +54,8 @@ services:
       
       # 開發時代碼掛載（避免重新編譯）
       - ./app.py:/app/app.py
+      - ./app_three_tabs.py:/app/app_three_tabs.py
+      - ./start.py:/app/start.py
       - ./start_reid_labeling.py:/app/start_reid_labeling.py
       - ./tools:/app/tools
       

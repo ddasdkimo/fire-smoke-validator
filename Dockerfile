@@ -48,5 +48,5 @@ ENV GRADIO_SERVER_PORT=7860
 # 暴露 Gradio 預設端口
 EXPOSE 7860
 
-# 啟動應用程式
-CMD ["python", "app.py"]
+# 啟動應用程式 (預設使用三頁籤版本)
+CMD ["python", "start.py", "three-tabs"]
