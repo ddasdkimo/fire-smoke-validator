@@ -998,9 +998,15 @@ def create_interface():
                     for i in range(len(analyzer.current_events)):
                         if analyzer.current_events[i]['label'] is None:
                             next_idx = i
+                            progress_message += "\n\n⚠️ 已到達最後一個事件，跳回第一個未標註事件"
                             break
                     else:
-                        next_idx = 0  # 全部都標註完了
+                        # 全部都標註完了
+                        next_idx = len(analyzer.current_events) - 1  # 停在最後一個
+                        labeled_count = sum(1 for e in analyzer.current_events if e['label'] is not None)
+                        total_count = len(analyzer.current_events)
+                        progress_message += f"\n\n🎉 恭喜！所有 {total_count} 個事件都已標註完成！"
+                        progress_message += "\n💾 請點擊下方「匯出標註資料集」按鈕保存結果"
                 
                 return next_idx, 0, progress_message
             return event_idx, 0, "標註失敗"
