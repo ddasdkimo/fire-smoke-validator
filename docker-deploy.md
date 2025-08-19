@@ -27,6 +27,8 @@
 
 ## 部署步驟
 
+### 生產環境部署
+
 1. **準備模型檔案**
    ```bash
    # 將 best.pt 模型檔案放在專案根目錄
@@ -49,6 +51,43 @@
 
 4. **訪問應用程式**
    - 開啟瀏覽器訪問: `http://<主機IP>:7860`
+
+### 開發環境部署 (代碼熱重載)
+
+如果您需要頻繁修改代碼，建議使用開發模式，避免每次都重新編譯：
+
+1. **準備開發環境**
+   ```bash
+   # 將 best.pt 模型檔案放在專案根目錄
+   ls -la best.pt
+   ```
+
+2. **使用開發模式啟動**
+   ```bash
+   # 方法 1: 使用開發腳本 (推薦)
+   ./dev-start.sh
+   
+   # 方法 2: 手動啟動
+   docker-compose -f docker-compose.yaml -f docker-compose.dev.yaml up
+   ```
+
+3. **開發模式特點**
+   - ✅ **代碼熱重載**: 修改 `app.py` 和 `tools/` 目錄後自動生效
+   - ✅ **無需重建**: 不用執行 `--build` 參數
+   - ✅ **調試模式**: 啟用詳細的錯誤信息
+   - ✅ **快速啟動**: 跳過健康檢查以加快啟動速度
+
+4. **開發常用指令**
+   ```bash
+   # 快速重啟 (保持代碼掛載)
+   ./dev-restart.sh
+   
+   # 查看即時日誌
+   docker-compose -f docker-compose.yaml -f docker-compose.dev.yaml logs -f
+   
+   # 停止開發環境
+   docker-compose -f docker-compose.yaml -f docker-compose.dev.yaml down
+   ```
 
 ## 常用指令
 

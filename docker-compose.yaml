@@ -51,6 +51,18 @@ services:
       - ./uploads:/app/uploads
       # 如果需要處理本地影片
       - ./videos:/app/videos:ro
+      
+      # 開發時代碼掛載（避免重新編譯）
+      - ./app.py:/app/app.py
+      - ./start_reid_labeling.py:/app/start_reid_labeling.py
+      - ./tools:/app/tools
+      
+      # 新的模組化架構
+      - ./core:/app/core
+      - ./ui:/app/ui
+      
+      # 暫存工作目錄
+      - ./temp_analysis:/app/temp_analysis
     
     # 健康檢查
     healthcheck:
