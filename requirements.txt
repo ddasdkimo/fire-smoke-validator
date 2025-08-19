@@ -44,3 +44,6 @@ ultralytics>=8.0.0
 
 # Object Tracking
 supervision>=0.16.0
+
+# Temporal Model Support (timm backbone models)
+timm>=0.9.12
