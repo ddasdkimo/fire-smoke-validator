@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  fire-smoke-validator:
+    build: .
+    container_name: fire-smoke-validator
+    
+    # 啟用 NVIDIA GPU 支援
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # 環境變數
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+      - GRADIO_SERVER_NAME=0.0.0.0
+      - GRADIO_SERVER_PORT=7860
+      - TZ=Asia/Taipei
+      # CUDA 調試環境變數
+      - CUDA_LAUNCH_BLOCKING=1
+      - TORCH_USE_CUDA_DSA=1
+      # RTX 5090 支援 - 計算能力 9.0 (Ada Lovelace)
+      - TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.0
+      # 解決 PTX 編譯問題
+      - PYTORCH_JIT_COMPILE_OPTIONS="-march=native"
+      - CUDA_MODULE_LOADING=LAZY
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      # 強制使用較低的 PTX 版本以確保相容性
+      - TORCH_CUDA_ARCH_LIST=8.0;8.6;8.9;9.0
+      - PYTORCH_NVFUSER_DISABLE=1
+    
+    # 端口映射
+    ports:
+      - "7861:7860"
+    
+    # 掛載卷
+    volumes:
+      # 模型檔案
+      - ./best.pt:/app/best.pt:ro
+      # 資料集輸出目錄
+      - ./dataset:/app/dataset
+      # 上傳目錄
+      - ./uploads:/app/uploads
+      # 如果需要處理本地影片
+      - ./videos:/app/videos:ro
+    
+    # 健康檢查
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:7860/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # 重啟策略
+    restart: unless-stopped
+    
+    # 資源限制（可根據需求調整）
+    mem_limit: 8g
+    shm_size: 2g
+    
+    # 網路設定
+    networks:
+      - fire-smoke-net
+
+networks:
+  fire-smoke-net:
+    driver: bridge
+
+# 持久化儲存卷（選擇性）
+volumes:
+  dataset_volume:
+    driver: local
+  uploads_volume:
+    driver: local

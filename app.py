@@ -446,7 +446,7 @@ class VideoAnalyzer:
             process = psutil.Process(os.getpid())
             memory_usage = process.memory_info().rss / 1024 / 1024  # MB
             
-            if memory_usage > 2000:  # 如果超過2GB
+            if memory_usage > 20000:  # 如果超過20GB
                 print(f"⚠️  記憶體使用量較高: {memory_usage:.1f} MB")
                 # 清理可能的大型變數
                 gc.collect()
