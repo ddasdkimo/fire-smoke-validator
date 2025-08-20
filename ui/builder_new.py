@@ -239,8 +239,8 @@ def create_labeling_tab(controller):
 def create_training_tab(training_controller):
     """建立訓練頁籤"""
     
-    gr.Markdown("## 🎓 模型訓練")
-    gr.Markdown("上傳標註資料集，選擇基礎模型，開始訓練自定義火煙偵測模型")
+    gr.Markdown("## 🎓 時序模型訓練")
+    gr.Markdown("上傳標註資料集，選擇時序分類模型架構，訓練火煙事件時序分類器（T=5幀輸入）")
     
     with gr.Row():
         with gr.Column(scale=1):
@@ -269,19 +269,19 @@ def create_training_tab(training_controller):
             )
             
             # 模型設定
-            gr.Markdown("### 🤖 訓練設定")
+            gr.Markdown("### 🤖 時序模型設定")
             
             base_model_dropdown = gr.Dropdown(
                 choices=training_controller.get_available_models(),
-                value="yolov8s.pt",
-                label="🎯 基礎模型",
-                info="選擇預訓練模型作為基礎"
+                value="temporal_convnext_tiny",
+                label="🎯 時序分類架構",
+                info="選擇timm backbone + 時序融合策略（推薦ConvNeXt-Tiny平衡款）"
             )
             
             model_info_display = gr.Textbox(
                 label="模型資訊",
-                value=training_controller.get_model_info("yolov8s.pt"),
-                lines=2,
+                value=training_controller.get_model_info("temporal_convnext_tiny"),
+                lines=3,
                 interactive=False
             )
             
@@ -304,10 +304,10 @@ def create_training_tab(training_controller):
                 )
             
             image_size_dropdown = gr.Dropdown(
-                choices=[320, 416, 512, 640, 832],
-                value=640,
+                choices=[224, 240, 288, 320, 384, 416, 512],
+                value=224,
                 label="📐 影像尺寸",
-                info="較大尺寸通常有更好精度但速度較慢"
+                info="建議使用模型推薦尺寸，或根據GPU記憶體調整"
             )
             
             # 訓練控制
@@ -342,12 +342,31 @@ def create_training_tab(training_controller):
             
             trained_models_display = gr.Textbox(
                 label="可用模型",
-                lines=6,
+                lines=8,
                 interactive=False,
                 placeholder="尚無已訓練模型..."
             )
             
-            refresh_models_btn = gr.Button("🔄 重新整理模型列表", variant="secondary")
+            with gr.Row():
+                refresh_models_btn = gr.Button("🔄 重新整理模型列表", variant="secondary")
+                
+                # 刪除模型功能
+                with gr.Column(scale=2):
+                    model_delete_index = gr.Number(
+                        label="模型編號",
+                        placeholder="輸入要刪除的模型編號",
+                        minimum=1,
+                        precision=0
+                    )
+                with gr.Column(scale=1):
+                    delete_model_btn = gr.Button("🗑️ 刪除模型", variant="stop")
+            
+            delete_result = gr.Textbox(
+                label="刪除結果",
+                lines=2,
+                interactive=False,
+                visible=False
+            )
     
     # 訓練進度計時器
     training_timer = gr.Timer(value=2.0, active=False)
@@ -363,15 +382,15 @@ def create_training_tab(training_controller):
     
     # 模型選擇變化
     base_model_dropdown.change(
-        training_controller.get_model_info,
+        training_controller.update_model_selection,
         inputs=[base_model_dropdown],
-        outputs=[model_info_display]
+        outputs=[model_info_display, image_size_dropdown]
     )
     
     # 開始訓練（框架功能）
     start_training_btn.click(
         lambda dataset, model, epochs, batch, size: training_controller.start_training(
-            "training_workspace", model, epochs, batch, size
+            dataset, model, epochs, batch, size
         ),
         inputs=[upload_result, base_model_dropdown, epochs_slider, batch_size_slider, image_size_dropdown],
         outputs=[training_results, training_timer]
@@ -391,32 +410,46 @@ def create_training_tab(training_controller):
     
     # 重新整理模型列表
     refresh_models_btn.click(
-        lambda: "\n".join([f"{m['name']} - {m['path']}" for m in training_controller.list_trained_models()]),
+        training_controller.refresh_models_list,
         outputs=[trained_models_display]
+    )
+    
+    # 刪除模型
+    delete_model_btn.click(
+        training_controller.delete_model,
+        inputs=[model_delete_index],
+        outputs=[delete_result, trained_models_display]
+    ).then(
+        lambda: gr.update(visible=True),
+        outputs=[delete_result]
     )
 
 
 def create_inference_tab(inference_controller):
     """建立推論頁籤"""
     
-    gr.Markdown("## 🔮 模型推論")  
-    gr.Markdown("載入訓練好的模型，對多張影像進行批次火煙偵測推論")
+    gr.Markdown("## 🔮 時序模型推論")  
+    gr.Markdown("載入訓練好的時序分類模型，對影像序列進行火煙事件分類推論（T=5幀輸入）")
     
     with gr.Row():
         with gr.Column(scale=1):
             # 模型載入
             gr.Markdown("### 🤖 模型載入")
             
+            # 初始載入模型列表
             available_models = inference_controller.get_available_models()
             model_choices = [f"{m['name']} ({m['type']})" for m in available_models]
-            model_paths = [m['path'] for m in available_models]
+            model_paths = {f"{m['name']} ({m['type']})": m['path'] for m in available_models}
             
             inference_model_dropdown = gr.Dropdown(
                 choices=model_choices,
                 value=model_choices[0] if model_choices else None,
-                label="🎯 選擇模型",
-                info="選擇要用於推論的模型"
+                label="🎯 選擇時序模型",
+                info="選擇要用於時序分類的訓練好模型"
             )
+            
+            # 儲存模型路徑映射
+            model_paths_state = gr.State(model_paths)
             
             device_dropdown = gr.Dropdown(
                 choices=['auto', 'cuda', 'cpu'],
@@ -425,7 +458,9 @@ def create_inference_tab(inference_controller):
                 info="選擇推論使用的設備"
             )
             
-            load_inference_model_btn = gr.Button("🔄 載入推論模型", variant="secondary")
+            with gr.Row():
+                load_inference_model_btn = gr.Button("📥 載入模型", variant="primary")
+                refresh_inference_models_btn = gr.Button("🔄 重新整理列表", variant="secondary")
             
             model_info = gr.Textbox(
                 label="📊 模型資訊",
@@ -435,22 +470,28 @@ def create_inference_tab(inference_controller):
             )
             
             # 推論設定
-            gr.Markdown("### ⚙️ 推論設定")
+            gr.Markdown("### ⚙️ 時序推論設定")
             
             inference_confidence = gr.Slider(
                 minimum=0.1,
                 maximum=1.0,
                 value=0.5,
                 step=0.05,
-                label="🎯 信心度閾值",
-                info="低於此信心度的偵測將被過濾"
+                label="🎯 分類信心度閾值",
+                info="顯示分類信心度參考（時序模型輸出二元分類結果）"
             )
             
             # 影像上傳
-            gr.Markdown("### 📷 影像上傳")
+            gr.Markdown("### 📷 時序影像上傳")
+            gr.Markdown("""
+**上傳同一事件的多幀影像：**
+- 建議上傳同一火煙事件的連續幀
+- 系統會自動處理為T=5固定輸入
+- 支援格式：JPG, PNG, BMP, TIFF
+            """)
             
             inference_images = gr.File(
-                label="上傳影像檔案（支援多檔案）",
+                label="上傳時序影像檔案（同一事件的多幀）",
                 file_count="multiple",
                 file_types=[".jpg", ".jpeg", ".png", ".bmp", ".tiff"]
             )
@@ -489,27 +530,57 @@ def create_inference_tab(inference_controller):
     
     # === 事件綁定 ===
     
+    # 重新整理模型列表
+    def refresh_model_list():
+        """重新整理推論模型列表"""
+        available_models = inference_controller.get_available_models()
+        model_choices = [f"{m['name']} ({m['type']})" for m in available_models]
+        model_paths = {f"{m['name']} ({m['type']})": m['path'] for m in available_models}
+        
+        # 返回更新的下拉選單和路徑映射
+        return (
+            gr.update(choices=model_choices, value=model_choices[0] if model_choices else None),
+            model_paths
+        )
+    
+    refresh_inference_models_btn.click(
+        refresh_model_list,
+        outputs=[inference_model_dropdown, model_paths_state]
+    )
+    
     # 載入推論模型
+    def load_selected_model(model_choice, device, model_paths):
+        """載入選擇的模型"""
+        if not model_choice or not model_paths:
+            return "❌ 請先選擇模型"
+        
+        model_path = model_paths.get(model_choice)
+        if not model_path:
+            return "❌ 找不到模型路徑"
+        
+        return inference_controller.load_model(model_path, device)
+    
     load_inference_model_btn.click(
-        lambda model_choice, device: inference_controller.load_model(
-            model_paths[model_choices.index(model_choice)] if model_choice in model_choices else model_paths[0],
-            device
-        ) if model_choices else "❌ 沒有可用模型",
-        inputs=[inference_model_dropdown, device_dropdown],
+        load_selected_model,
+        inputs=[inference_model_dropdown, device_dropdown, model_paths_state],
         outputs=[model_info]
     )
     
     # 開始推論
-    inference_btn.click(
-        lambda images, conf: inference_controller.inference_batch_images(images, conf),
-        inputs=[inference_images, inference_confidence],
-        outputs=[inference_summary, detailed_results]
-    )
+    def run_inference_and_update(images, conf):
+        """執行推論並更新所有結果"""
+        # 執行推論
+        summary, results = inference_controller.inference_batch_images(images, conf)
+        
+        # 獲取畫廊圖片
+        gallery_images = inference_controller.get_detection_gallery()
+        
+        return summary, results, gallery_images
     
-    # 更新畫廊
     inference_btn.click(
-        inference_controller.get_detection_gallery,
-        outputs=[results_gallery]
+        run_inference_and_update,
+        inputs=[inference_images, inference_confidence],
+        outputs=[inference_summary, detailed_results, results_gallery]
     )
     
     # 清除結果

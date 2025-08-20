@@ -13,6 +13,18 @@ import os
 from datetime import datetime
 
 try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+try:
     from ultralytics import YOLO
     ULTRALYTICS_AVAILABLE = True
 except ImportError:
@@ -35,73 +47,71 @@ class ModelInference:
         self.inference_results = []
     
     def get_available_models(self):
-        """取得可用的模型列表"""
+        """取得可用的時序模型列表"""
         models = []
         
-        # 預設模型
-        default_model = Path("best.pt")
-        if default_model.exists():
+        # 時序訓練模型 - 從 runs/temporal_training 目錄
+        temporal_runs_dir = Path("runs/temporal_training")
+        if temporal_runs_dir.exists():
+            for run_dir in temporal_runs_dir.iterdir():
+                if run_dir.is_dir():
+                    # 尋找 best_model.pth
+                    best_model = run_dir / "best_model.pth"
+                    if best_model.exists():
+                        models.append({
+                            "name": f"時序模型 - {run_dir.name}",
+                            "path": str(best_model),
+                            "type": "temporal_best",
+                            "created": best_model.stat().st_mtime
+                        })
+                    
+                    # 尋找 final_model.pth
+                    final_model = run_dir / "final_model.pth"
+                    if final_model.exists():
+                        models.append({
+                            "name": f"時序模型 (最終) - {run_dir.name}",
+                            "path": str(final_model),
+                            "type": "temporal_final",
+                            "created": final_model.stat().st_mtime
+                        })
+        
+        # 如果沒有找到任何模型，提供預設說明
+        if not models:
             models.append({
-                "name": "best.pt (預設模型)",
-                "path": str(default_model),
-                "type": "default"
+                "name": "尚無已訓練模型 (請先進行訓練)",
+                "path": "",
+                "type": "placeholder",
+                "created": 0
             })
         
-        # 已訓練的模型
-        runs_dir = Path("runs/detect")
-        if runs_dir.exists():
-            for run_dir in runs_dir.iterdir():
-                if run_dir.is_dir():
-                    weights_dir = run_dir / "weights"
-                    if weights_dir.exists():
-                        best_pt = weights_dir / "best.pt"
-                        if best_pt.exists():
-                            models.append({
-                                "name": f"{run_dir.name}/best.pt",
-                                "path": str(best_pt),
-                                "type": "trained",
-                                "created": best_pt.stat().st_mtime
-                            })
-        
-        # 按類型和時間排序
-        models.sort(key=lambda x: (x["type"] != "default", -x.get("created", 0)))
+        # 按時間排序，最新的在前面
+        models.sort(key=lambda x: -x.get("created", 0))
         return models
     
     def load_model(self, model_path, device='auto'):
-        """載入推論模型"""
+        """載入時序推論模型"""
         try:
+            if not model_path or model_path == "":
+                return "❌ 請先選擇有效的模型"
+            
             if not Path(model_path).exists():
                 return f"❌ 模型檔案不存在: {model_path}"
             
-            # 判斷模型類型
-            is_temporal_model = self._is_temporal_model(model_path)
-            
-            if is_temporal_model:
-                # 載入時序模型
-                return self._load_temporal_model(model_path, device)
-            else:
-                # 載入 YOLO 模型
-                return self._load_yolo_model(model_path, device)
+            # 載入時序模型
+            return self._load_temporal_model(model_path, device)
             
         except Exception as e:
             self.current_model = None
             self.current_model_path = None
             return f"❌ 模型載入失敗: {str(e)}"
     
-    def _is_temporal_model(self, model_path):
-        """判斷是否為時序模型"""
-        try:
-            # 嘗試載入檢查點
-            import torch
-            checkpoint = torch.load(model_path, map_location='cpu')
-            # 如果有 model_config 且包含 backbone_name，視為時序模型
-            return 'model_config' in checkpoint and 'backbone_name' in checkpoint.get('model_config', {})
-        except:
-            return False
     
     def _load_temporal_model(self, model_path, device):
         """載入時序模型"""
         try:
+            if not TORCH_AVAILABLE:
+                return "❌ PyTorch 未安裝，無法載入時序模型"
+                
             from .models.temporal_trainer import load_temporal_model
             
             # 設定設備
@@ -132,40 +142,6 @@ class ModelInference:
         except Exception as e:
             return f"❌ 時序模型載入失敗: {str(e)}"
     
-    def _load_yolo_model(self, model_path, device):
-        """載入 YOLO 模型"""
-        try:
-            if not ULTRALYTICS_AVAILABLE:
-                return "❌ 未安裝 ultralytics 套件，無法載入 YOLO 模型"
-            
-            # 載入模型
-            self.current_model = YOLO(model_path)
-            
-            # 設定設備
-            if device == 'auto':
-                # 自動檢測最佳設備
-                if hasattr(self.current_model, 'device'):
-                    device = str(self.current_model.device)
-                else:
-                    device = 'cpu'
-            
-            self.current_model.to(device)
-            self.current_model_path = model_path
-            
-            # 取得模型資訊
-            model_info = self._get_model_info(model_path)
-            self.current_model_info = f"""✅ YOLO 模型載入成功！
-
-📁 模型路徑: {model_path}
-⚡ 運算設備: {device}
-🎯 模型類型: YOLO 物件偵測
-{model_info}
-            """
-            
-            return self.current_model_info
-            
-        except Exception as e:
-            return f"❌ YOLO 模型載入失敗: {str(e)}"
     
     def _get_model_info(self, model_path):
         """取得模型詳細資訊"""
@@ -191,30 +167,27 @@ class ModelInference:
             return f"⚠️ 無法取得詳細資訊: {str(e)}\n"
     
     def inference_batch_images(self, image_files, confidence_threshold=0.5):
-        """批次推論多張影像"""
+        """時序模型批次推論"""
         try:
             if not self.current_model:
-                return "❌ 請先載入模型", []
+                return "❌ 請先載入時序模型", []
             
             if not image_files:
-                return "❌ 請上傳影像檔案", []
+                return "❌ 請上傳時序影像檔案（建議上傳同一事件的多幀影像）", []
             
-            # 判斷模型類型
-            is_temporal_model = self._is_temporal_model(self.current_model_path)
-            
-            if is_temporal_model:
-                return self._inference_temporal_model(image_files, confidence_threshold)
-            else:
-                return self._inference_yolo_model(image_files, confidence_threshold)
+            # 執行時序模型推論
+            return self._inference_temporal_model(image_files, confidence_threshold)
             
         except Exception as e:
-            return f"❌ 推論失敗: {str(e)}", []
+            return f"❌ 時序推論失敗: {str(e)}", []
     
     def _inference_temporal_model(self, image_files, confidence_threshold=0.5):
         """時序模型推論"""
         try:
+            if not TORCH_AVAILABLE:
+                return "❌ PyTorch 未安裝，無法進行時序推論", []
+                
             from .models.data_utils import prepare_temporal_frames
-            import torch
             
             results = []
             processed_count = 0
@@ -287,21 +260,33 @@ class ModelInference:
                 
                 results.append(sequence_result)
                 
-                # 生成摘要
-                summary = f"""✅ 時序模型推論完成！
+                # 生成詳細摘要
+                status_emoji = "🔥" if predicted_label == "true_positive" else "✅"
+                result_name = "真實火煙事件" if predicted_label == "true_positive" else "非火煙事件"
+                
+                summary = f"""{status_emoji} 時序模型推論完成！
 
-🎯 模型預測:
-- 預測類別: {predicted_label}
-- 信心度: {confidence:.3f}
-- 假陽性機率: {probabilities[0][0]:.3f}
-- 真火煙機率: {probabilities[0][1]:.3f}
+🎯 分析結果:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 預測類別: {result_name}
+📈 信心度: {confidence:.3f} ({confidence*100:.1f}%)
 
-📊 處理結果:
-- 輸入幀數: {len(frames)} 張
-- 處理幀數: 5 張 (T=5 固定策略)
-- 時序融合: {self.current_model.temporal_fusion}
+🔍 詳細機率分佈:
+- 🔥 真實火煙: {probabilities[0][1]:.3f} ({probabilities[0][1]*100:.1f}%)
+- ❌ 誤報事件: {probabilities[0][0]:.3f} ({probabilities[0][0]*100:.1f}%)
 
-📁 結果儲存在: {output_path}
+⚙️ 處理參數:
+- 輸入幀數: {len(frames)} 張影像
+- 時序長度: T=5 (固定策略)
+- 模型架構: {self.current_model.backbone_name}
+- 融合方式: {self.current_model.temporal_fusion}
+
+💾 結果檔案:
+- 視覺化結果: {Path(output_path).name}
+- 完整路徑: {output_path}
+
+📅 分析時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 """
                 
                 self.inference_results = results
@@ -317,136 +302,208 @@ class ModelInference:
         except ImportError:
             return "❌ 缺少時序模型相關依賴", []
     
-    def _inference_yolo_model(self, image_files, confidence_threshold=0.5):
-        """YOLO 模型推論"""
-        results = []
-        processed_count = 0
-        
-        # 確保是列表格式
-        if not isinstance(image_files, list):
-            image_files = [image_files]
-        
-        for img_file in image_files:
-            try:
-                # 讀取影像
-                image = cv2.imread(img_file.name)
-                if image is None:
-                    results.append({
-                        "filename": img_file.name,
-                        "error": "無法讀取影像檔案"
-                    })
-                    continue
-                
-                # 進行推論
-                prediction_results = self.current_model(image, conf=confidence_threshold, verbose=False)
-                
-                # 處理結果
-                detections = []
-                annotated_image = image.copy()
-                
-                for result in prediction_results:
-                    if result.boxes is not None:
-                        for box in result.boxes:
-                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                            conf = box.conf[0].cpu().numpy()
-                            cls = int(box.cls[0].cpu().numpy())
-                            
-                            # 取得類別名稱
-                            class_name = "unknown"
-                            if hasattr(self.current_model.model, 'names'):
-                                class_name = self.current_model.model.names.get(cls, f"class_{cls}")
-                            
-                            detections.append({
-                                "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                                "confidence": float(conf),
-                                "class": int(cls),
-                                "class_name": class_name
-                            })
-                            
-                            # 在影像上繪製框線
-                            cv2.rectangle(annotated_image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                            cv2.putText(annotated_image, f"{class_name}: {conf:.2f}",
-                                      (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-                
-                # 儲存標註後的影像
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_filename = f"yolo_inference_{processed_count:03d}_{timestamp}.jpg"
-                output_path = self.inference_dir / output_filename
-                cv2.imwrite(str(output_path), annotated_image)
-                
-                results.append({
-                    "filename": Path(img_file.name).name,
-                    "detections": detections,
-                    "detection_count": len(detections),
-                    "annotated_image_path": str(output_path),
-                    "original_size": image.shape[:2]  # (height, width)
-                })
-                
-                processed_count += 1
-                
-            except Exception as e:
-                results.append({
-                    "filename": Path(img_file.name).name,
-                    "error": str(e)
-                })
-        
-        # 儲存推論結果
-        self.inference_results = results
-        
-        # 生成摘要
-        total_detections = sum(r.get("detection_count", 0) for r in results)
-        successful_count = len([r for r in results if "error" not in r])
-        error_count = len([r for r in results if "error" in r])
-        
-        summary = f"""✅ YOLO 批次推論完成！
-
-📊 處理結果:
-- 成功處理: {successful_count} 張影像
-- 處理失敗: {error_count} 張影像  
-- 總偵測數: {total_detections} 個物件
-
-📁 結果儲存在: {self.inference_dir}
-        """
-        
-        return summary, results
     
     def _create_temporal_result_grid(self, frames, predicted_label, confidence):
         """建立時序結果網格圖像"""
+        try:
+            if not PIL_AVAILABLE:
+                # 如果 PIL 不可用，使用英文版本
+                return self._create_temporal_result_grid_english(frames, predicted_label, confidence)
+            
+            # 限制顯示的幀數
+            display_frames = frames[:5] if len(frames) > 5 else frames
+            
+            # 調整每幀大小
+            target_size = (180, 180)
+            resized_frames = []
+            for frame in display_frames:
+                resized = cv2.resize(frame, target_size)
+                # 將 BGR 轉換為 RGB (PIL 使用 RGB)
+                resized_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                resized_frames.append(resized_rgb)
+            
+            # 建立網格
+            cols = len(resized_frames)
+            padding = 10
+            
+            # 建立空白畫布
+            header_height = 80
+            footer_height = 60
+            canvas_height = target_size[1] + header_height + footer_height
+            canvas_width = target_size[0] * cols + padding * (cols + 1)
+            
+            # 使用 PIL 創建圖像
+            canvas = Image.new('RGB', (canvas_width, canvas_height), color=(240, 240, 240))
+            draw = ImageDraw.Draw(canvas)
+            
+            # 嘗試載入中文字體
+            try:
+                # 常見的中文字體路徑
+                font_paths = [
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                    "/System/Library/Fonts/Arial.ttf",  # macOS
+                    "C:\\Windows\\Fonts\\Arial.ttf",    # Windows
+                ]
+                
+                title_font = None
+                text_font = None
+                small_font = None
+                
+                for font_path in font_paths:
+                    if Path(font_path).exists():
+                        title_font = ImageFont.truetype(font_path, 24)
+                        text_font = ImageFont.truetype(font_path, 18)
+                        small_font = ImageFont.truetype(font_path, 14)
+                        break
+                
+                # 如果找不到字體，使用預設字體
+                if not title_font:
+                    title_font = ImageFont.load_default()
+                    text_font = ImageFont.load_default()
+                    small_font = ImageFont.load_default()
+                    
+            except Exception:
+                title_font = ImageFont.load_default()
+                text_font = ImageFont.load_default()
+                small_font = ImageFont.load_default()
+            
+            # 添加標題背景
+            draw.rectangle([(0, 0), (canvas_width, header_height)], fill=(50, 50, 50))
+            
+            # 添加預測結果標題
+            title_text = "Temporal Fire/Smoke Classification Result"
+            draw.text((20, 15), title_text, fill=(255, 255, 255), font=title_font)
+            
+            # 添加預測結果
+            if predicted_label == "true_positive":
+                result_text = "Prediction: Fire/Smoke Detected"
+                result_color = (0, 255, 0)  # 綠色
+                status_text = "Fire/Smoke Event Detected"
+            else:
+                result_text = "Prediction: No Fire/Smoke"
+                result_color = (255, 165, 0)  # 橙色
+                status_text = "Non Fire/Smoke Event"
+            
+            confidence_text = f"Confidence: {confidence:.3f} ({confidence*100:.1f}%)"
+            
+            draw.text((20, 45), result_text, fill=result_color, font=text_font)
+            draw.text((350, 45), confidence_text, fill=(255, 255, 255), font=text_font)
+            
+            # 放置幀
+            for i, frame in enumerate(resized_frames):
+                x_start = padding + i * (target_size[0] + padding)
+                y_start = header_height + 10
+                
+                # 添加白色邊框
+                border_box = [(x_start-2, y_start-2), (x_start+target_size[0]+2, y_start+target_size[1]+2)]
+                draw.rectangle(border_box, outline=(255, 255, 255), width=2)
+                
+                # 將 numpy 陣列轉換為 PIL 圖像
+                frame_img = Image.fromarray(frame)
+                canvas.paste(frame_img, (x_start, y_start))
+                
+                # 添加幀編號
+                frame_text = f"Frame {i+1}"
+                draw.text((x_start + 5, y_start - 20), frame_text, fill=(100, 100, 100), font=small_font)
+            
+            # 添加底部狀態
+            footer_y = header_height + target_size[1] + 20
+            footer_box = [(0, footer_y), (canvas_width, canvas_height)]
+            draw.rectangle(footer_box, fill=(240, 240, 240))
+            
+            draw.text((20, footer_y + 15), status_text, fill=result_color, font=text_font)
+            
+            # 添加處理信息
+            info_text = f"Processed {len(display_frames)} frames, Temporal Length: T=5"
+            draw.text((20, footer_y + 35), info_text, fill=(100, 100, 100), font=small_font)
+            
+            # 將 PIL 圖像轉換回 OpenCV 格式 (RGB -> BGR)
+            canvas_array = np.array(canvas)
+            canvas_bgr = cv2.cvtColor(canvas_array, cv2.COLOR_RGB2BGR)
+            
+            return canvas_bgr
+            
+        except Exception as e:
+            print(f"建立結果網格時發生錯誤: {e}")
+            # 回傳英文版本作為備選
+            return self._create_temporal_result_grid_english(frames, predicted_label, confidence)
+    
+    def _create_temporal_result_grid_english(self, frames, predicted_label, confidence):
+        """建立時序結果網格圖像 (英文版本)"""
         try:
             # 限制顯示的幀數
             display_frames = frames[:5] if len(frames) > 5 else frames
             
             # 調整每幀大小
-            target_size = (200, 200)
+            target_size = (180, 180)
             resized_frames = []
             for frame in display_frames:
                 resized = cv2.resize(frame, target_size)
                 resized_frames.append(resized)
             
             # 建立網格
-            rows = 1
             cols = len(resized_frames)
+            padding = 10
             
             # 建立空白畫布
-            canvas_height = target_size[1] + 100  # 額外空間用於文字
-            canvas_width = target_size[0] * cols
-            canvas = np.ones((canvas_height, canvas_width, 3), dtype=np.uint8) * 255
+            header_height = 80
+            footer_height = 60
+            canvas_height = target_size[1] + header_height + footer_height
+            canvas_width = target_size[0] * cols + padding * (cols + 1)
+            canvas = np.ones((canvas_height, canvas_width, 3), dtype=np.uint8) * 240
+            
+            # 添加標題背景
+            cv2.rectangle(canvas, (0, 0), (canvas_width, header_height), (50, 50, 50), -1)
+            
+            # 添加預測結果標題
+            title_text = "Temporal Fire/Smoke Classification"
+            cv2.putText(canvas, title_text, (20, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            # 添加預測結果
+            if predicted_label == "true_positive":
+                result_text = "Fire/Smoke Detected"
+                result_color = (0, 255, 0)  # 綠色
+                status_text = "Fire/Smoke Event"
+            else:
+                result_text = "No Fire/Smoke"
+                result_color = (0, 165, 255)  # 橙色
+                status_text = "Non Fire/Smoke Event"
+            
+            confidence_text = f"Confidence: {confidence:.3f}"
+            
+            cv2.putText(canvas, result_text, (20, 55),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, result_color, 2)
+            cv2.putText(canvas, confidence_text, (300, 55),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
             # 放置幀
             for i, frame in enumerate(resized_frames):
-                x_start = i * target_size[0]
-                y_start = 50  # 為頂部文字留空間
+                x_start = padding + i * (target_size[0] + padding)
+                y_start = header_height + 10
+                
+                # 添加白色邊框
+                cv2.rectangle(canvas, (x_start-2, y_start-2), 
+                             (x_start+target_size[0]+2, y_start+target_size[1]+2), 
+                             (255, 255, 255), 2)
+                
                 canvas[y_start:y_start+target_size[1], x_start:x_start+target_size[0]] = frame
                 
                 # 添加幀編號
-                cv2.putText(canvas, f"Frame {i+1}", (x_start + 5, y_start - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                cv2.putText(canvas, f"Frame {i+1}", (x_start + 5, y_start - 8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
             
-            # 添加預測結果
-            result_text = f"Prediction: {predicted_label} (Conf: {confidence:.3f})"
-            text_color = (0, 255, 0) if predicted_label == "true_positive" else (0, 0, 255)
-            cv2.putText(canvas, result_text, (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, text_color, 2)
+            # 添加底部狀態
+            footer_y = header_height + target_size[1] + 20
+            cv2.rectangle(canvas, (0, footer_y), (canvas_width, canvas_height), (240, 240, 240), -1)
+            cv2.putText(canvas, status_text, (20, footer_y + 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, result_color, 2)
+            
+            # 添加處理信息
+            info_text = f"Processed {len(display_frames)} frames, T=5"
+            cv2.putText(canvas, info_text, (20, footer_y + 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
             
             return canvas
             
@@ -508,7 +565,11 @@ class ModelInference:
         
         gallery_paths = []
         for result in self.inference_results:
-            if "annotated_image_path" in result and Path(result["annotated_image_path"]).exists():
+            # 檢查時序模型結果
+            if "result_image_path" in result and Path(result["result_image_path"]).exists():
+                gallery_paths.append(result["result_image_path"])
+            # 檢查其他模型結果
+            elif "annotated_image_path" in result and Path(result["annotated_image_path"]).exists():
                 gallery_paths.append(result["annotated_image_path"])
         
         return gallery_paths

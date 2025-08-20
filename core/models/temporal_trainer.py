@@ -46,12 +46,12 @@ class TemporalFireSmokeDataset(Dataset):
         self.image_size = image_size
         self.training = training
         
-        # 載入資料
-        self.samples = self._load_dataset()
-        
-        # 類別映射
+        # 類別映射 - 必須在 _load_dataset 之前初始化
         self.class_to_idx = {'false_positive': 0, 'true_positive': 1}
         self.idx_to_class = {v: k for k, v in self.class_to_idx.items()}
+        
+        # 載入資料
+        self.samples = self._load_dataset()
         
         print(f"✅ 載入 {len(self.samples)} 個時序樣本")
         self._print_dataset_stats()
@@ -165,8 +165,13 @@ class TemporalTrainer:
         self.model_config = model_config
         self.device = self._setup_device(device)
         
-        # 建立模型
-        self.model = TemporalFireSmokeClassifier(**model_config)
+        # 建立模型 - 過濾掉不需要的參數
+        valid_model_params = {
+            'backbone_name', 'num_classes', 'temporal_frames', 
+            'pretrained', 'temporal_fusion', 'dropout', 'freeze_backbone'
+        }
+        filtered_config = {k: v for k, v in model_config.items() if k in valid_model_params}
+        self.model = TemporalFireSmokeClassifier(**filtered_config)
         self.model.to(self.device)
         
         print(f"✅ 建立時序模型: {self.model.backbone_name}")
@@ -459,8 +464,15 @@ def load_temporal_model(model_path: str, device: str = 'auto') -> TemporalFireSm
     # 載入檢查點
     checkpoint = torch.load(model_path, map_location=device)
     
-    # 建立模型
-    model = TemporalFireSmokeClassifier(**checkpoint['model_config'])
+    # 建立模型 - 過濾掉不支援的參數
+    model_config = checkpoint['model_config']
+    valid_params = {
+        'backbone_name', 'num_classes', 'temporal_frames',
+        'pretrained', 'temporal_fusion', 'dropout', 'freeze_backbone'
+    }
+    filtered_config = {k: v for k, v in model_config.items() if k in valid_params}
+    
+    model = TemporalFireSmokeClassifier(**filtered_config)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
     model.eval()

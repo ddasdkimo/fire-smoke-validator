@@ -2,119 +2,217 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 專案概述
+## Project Overview
 
-這是一個**火煙誤判標註系統** - 簡化的網頁應用程式，用於快速建立訓練資料集。上傳影片以使用 best.pt 模型自動掃描，使用 ReID 分組相似事件，並快速標註真實火煙與誤判。
+This is a **Fire/Smoke False Positive Labeling System** - A web application for rapidly creating training datasets. Upload videos for automatic scanning with YOLO models, group similar events using ReID, and quickly label true fire/smoke vs false positives.
 
-## 開發指令
+The project has been refactored from a monolithic 1200+ line application into a modular architecture with clear separation of concerns.
 
-### 環境設定
+## Development Commands
+
+### Environment Setup
 ```bash
-# 安裝所有依賴套件
+# Install all dependencies
 pip install -r requirements.txt
 
-# 開發模式安裝套件（選擇性）
+# Development mode installation (optional)
 pip install -e .
 ```
 
-### 程式碼品質
+### Code Quality
 ```bash
-# 使用 black 格式化程式碼
-black app.py tools/
+# Format code with black
+black app.py core/ ui/ tools/
 
-# 使用 flake8 檢查程式碼  
-flake8 app.py tools/
+# Check code with flake8  
+flake8 app.py core/ ui/ tools/
 
-# 執行測試（如果有的話）
+# Run tests (if available)
 pytest tests/
 ```
 
-### 主要應用程式
+### Running the Application
 ```bash
-# 啟動網頁介面
+# Main web interface
 python app.py
 
-# 使用啟動腳本
+# Using startup script
 ./run.sh
 
-# 替代的 ReID 標註介面
-python start_reid_labeling.py
+# Alternative applications
+python app_three_tabs.py    # Three-tab system with training/inference
+python start_reid_labeling.py    # Alternative ReID labeling interface
 ```
 
-## 架構總覽
+### Version Switching
+```bash
+./switch-to-new.sh    # Switch to modular version
+./switch-to-old.sh    # Switch to monolithic version
+```
 
-### 核心應用程式
-- **主程式**: `app.py` - 基於 Gradio 的影片分析和標註網頁介面（1,181 行）
-- **影片分析**: 使用 best.pt YOLO 模型自動掃描上傳的影片
-- **ReID 分組**: 將跨幀的相似偵測結果分組為事件
-- **快速標註**: 二分類介面（真實火煙 vs 誤判）
-- **資料集匯出**: 匯出標註資料為結構化訓練資料集
+## Architecture Overview
 
-### 關鍵技術
-- **偵測**: Ultralytics YOLO（預訓練模型位於 `best.pt`）
-- **追蹤**: Supervision 函式庫用於物件追蹤和 ReID 分組
-- **介面**: Gradio 網頁框架
-- **視覺**: OpenCV 處理影片
-- **加速**: 支援 Mac MPS、CUDA 和 CPU 推論
+### Core Components
 
-### 資料流程
-1. 上傳影片 → 擷取幀
-2. 對幀執行 YOLO 偵測
-3. 透過 ReID 相似度分組偵測結果
-4. 呈現事件縮圖供標註
-5. 匯出標註資料集為 ZIP
+The system follows a modular architecture with clear separation between core logic and UI:
 
-### 輸出結構
+```
+app.py (63 lines) → Bootstraps the application
+├── core/
+│   ├── analyzer.py      → Video processing, YOLO detection, ReID grouping
+│   ├── labeling.py      → Label management, progress tracking, data export
+│   ├── inference.py     → Temporal classification inference
+│   ├── training.py      → Model training pipeline
+│   └── models/          → Deep learning models for temporal classification
+│       ├── data_utils.py       → Dataset utilities and preprocessing
+│       ├── temporal_classifier.py → Time-series classification models
+│       └── temporal_trainer.py → Training pipeline for temporal models
+└── ui/
+    ├── builder.py              → Gradio interface construction
+    ├── builder_new.py          → Three-tab interface with training/inference
+    ├── interface.py            → User interaction logic
+    ├── training_controller.py  → Training workflow management
+    └── inference_controller.py → Inference workflow management
+```
+
+### Key Features
+- **Detection**: Ultralytics YOLO (pretrained model at `best.pt`)
+- **Tracking**: Supervision library for object tracking and ReID grouping
+- **Interface**: Gradio web framework with automatic frame carousel
+- **Export**: Structured dataset export as ZIP files
+- **Temporal Classification**: Deep learning models for time-series fire/smoke analysis
+- **Model Training**: Built-in training pipeline with multiple backbone architectures
+- **Acceleration**: Supports Mac MPS, CUDA, and CPU inference
+
+### Data Flow
+
+#### Labeling Workflow
+1. Upload video → Extract frames
+2. Run YOLO detection on frames
+3. Group detections via ReID similarity
+4. Present event thumbnails for labeling
+5. Export labeled dataset as ZIP
+
+#### Training Workflow
+1. Upload labeled datasets (ZIP files)
+2. Configure training parameters and model architecture
+3. Train temporal classification models
+4. Monitor training progress and metrics
+5. Save trained models for inference
+
+#### Inference Workflow
+1. Load trained temporal classification model
+2. Upload video for temporal analysis
+3. Generate classification results with confidence scores
+4. Export inference results
+
+### Output Structure
+
+#### Labeling Dataset Output
 ```
 dataset/
 └── export_YYYYMMDD_HHMMSS.zip
-    ├── true_positive/          # 真實火煙事件
+    ├── true_positive/          # Real fire/smoke events
     │   ├── event_0/
-    │   │   ├── frame_000_1.2s.jpg
-    │   │   ├── frame_001_1.7s.jpg  
+    │   │   ├── crop_000_1.2s.jpg
     │   │   └── metadata.json
-    │   └── event_1/
-    └── false_positive/         # 誤判事件
-        ├── event_2/
-        └── event_3/
+    └── false_positive/         # False positive events
 ```
 
-## 關鍵考量
+#### Training Output
+```
+runs/
+└── temporal_training/
+    └── train_YYYYMMDD_HHMMSS/
+        ├── best_model.pth      # Best trained model
+        ├── config.yaml         # Training configuration
+        ├── training_log.txt    # Training progress log
+        └── metrics/            # Training metrics and plots
+```
 
-- 從原始複雜的時序分類專案簡化而來
-- 專注於快速誤判資料集建立
-- 使用現有的 best.pt 模型進行偵測
-- 二分類標註針對速度最佳化
-- 輕量化架構，移除不必要的元件
-- 支援 Mac MPS 加速模型推論
-- 內建記憶體管理（每 500 幀自動釋放）
-- 支援並行分析多個影片
-- 自動裝置偵測（CPU/CUDA/MPS）
+#### Inference Output
+```
+inference_workspace/
+└── inference_YYYYMMDD_HHMMSS/
+    ├── results.json           # Classification results
+    ├── confidence_scores.csv  # Detailed confidence scores
+    └── visualizations/        # Result visualizations
+```
 
-## 調整參數
+## Important Parameters
 
-在 `app.py` 中可調整的重要參數：
-- `conf=0.3`: 偵測信心度閾值（第 144 行）
-- `sample_interval`: 影片採樣間隔（第 80 行） 
-- ReID 分組閾值（第 234 行）
+Adjustable parameters in the codebase:
+- `conf=0.3`: Detection confidence threshold (analyzer.py:144)
+- `sample_interval`: Video sampling interval (analyzer.py:80)
+- ReID grouping threshold (analyzer.py:234)
+- Min/max frames per event: Configurable in UI
 
-## 環境變數
+## Multi-Application System
+
+The project contains multiple entry points:
+- `app.py`: Main simplified labeling interface (modular version)
+- `app_old.py`: Original monolithic version (1200+ lines)  
+- `app_new.py`: Intermediate refactored version
+- `app_three_tabs.py`: **Comprehensive three-tab system with labeling/training/inference**
+- `start_reid_labeling.py`: Alternative ReID labeling interface
+
+### Training Progress Monitoring
+
+When training is in progress, monitor status through:
+- **Training logs**: Check `runs/temporal_training/train_*/training_log.txt`
+- **Process monitoring**: Use `ps aux | grep python` to see active training processes
+- **GPU usage**: Use `nvidia-smi` (if CUDA available) or Activity Monitor (if MPS)
+- **Training workspace**: Check `training_workspace/` for current datasets and configs
+
+## Environment Variables
 
 ```bash
-export PYTORCH_ENABLE_MPS_FALLBACK=1  # 允許 MPS 回退到 CPU
-export OMP_NUM_THREADS=4              # 限制執行緒數量
+export PYTORCH_ENABLE_MPS_FALLBACK=1  # Allow MPS fallback to CPU
+export OMP_NUM_THREADS=4              # Limit thread count
 ```
 
-## 工具目錄
+## Temporal Classification Models
 
-- `tools/reid_labeling_interface.py`: 進階時序標註工具，包含 ReID 功能
-- `tools/data_labeling_interface.py`: 簡單的火煙分類工具
+### Supported Model Architectures
 
-## 目前狀態
+The system supports multiple backbone architectures optimized for different use cases:
 
-- ✅ 簡化的網頁應用程式完成
-- ✅ 影片上傳和分析功能正常
-- ✅ ReID 事件分組已實作  
-- ✅ 快速二分類標註介面就緒
-- ✅ 資料集匯出功能完成
-- ⚠️ 無正式測試框架（雖然 requirements.txt 包含 pytest）
+#### Low Latency (Edge/Real-time)
+- `temporal_mobilenetv3_large`: MobileNetV3-Large + Attention - Mobile optimized
+- `temporal_ghostnet_100`: GhostNet-100 + Attention - Lightweight efficient
+- `temporal_efficientnet_b0`: EfficientNet-B0 + Attention - Classic lightweight
+
+#### Balanced (Recommended)
+- `temporal_convnext_tiny`: ConvNeXt-Tiny + Attention - **Recommended starting point**
+- `temporal_efficientnetv2_s`: EfficientNetV2-S + Attention - Speed/accuracy balance
+- `temporal_resnet50`: ResNet50 + Attention - Proven backbone
+
+#### High Accuracy
+- `temporal_convnext_base`: ConvNeXt-Base + Attention - High accuracy
+- `temporal_swin_base_patch4_window7_224`: Swin Transformer - SOTA performance
+
+### Training Commands
+
+```bash
+# Monitor training progress
+tail -f runs/temporal_training/train_*/training_log.txt
+
+# Check active training processes
+ps aux | grep python | grep training
+
+# Monitor GPU usage (if available)
+watch -n 1 nvidia-smi
+```
+
+## Current Status
+
+- ✅ Modular web application architecture
+- ✅ Video upload and concurrent analysis
+- ✅ ReID event grouping implemented  
+- ✅ Fast binary classification interface
+- ✅ Dataset export functionality
+- ✅ Three-tab system with training/inference capabilities
+- ✅ Temporal classification model training pipeline
+- ✅ Multiple backbone architecture support
+- ⚠️ No formal test framework setup (pytest in requirements but no tests/ directory)
+- 🔄 Active refactoring - multiple app versions coexist
