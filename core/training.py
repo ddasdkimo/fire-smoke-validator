@@ -221,7 +221,7 @@ class ModelTrainer:
             
 📊 處理結果:
 - 成功處理: {total_stats['processed_files']} 個ZIP檔案
-- 失敗檔案: {len(total_stats['failed_files'])} 個
+- 跳過檔案: {len(total_stats['failed_files'])} 個
 
 📈 合併後統計:
 - 真實火煙事件: {total_stats['true_positive']} 個
@@ -231,11 +231,18 @@ class ModelTrainer:
 📁 時序分類資料集路徑: {temporal_dataset_dir}
             """
             
-            # 如果有失敗檔案，添加詳細信息
+            # 如果有跳過的檔案，添加詳細信息
             if total_stats["failed_files"]:
-                result_text += "\n\n⚠️ 失敗檔案詳情:\n"
+                result_text += "\n\nℹ️ 跳過檔案詳情:\n"
                 for failed in total_stats["failed_files"]:
-                    result_text += f"- {failed['filename']}: {failed['error']}\n"
+                    # 改進錯誤訊息顯示
+                    error_msg = failed['error']
+                    if "缺少 true_positive 和 false_positive" in error_msg:
+                        error_msg = "檔案結構不符合預期格式（可能是空檔案或損壞檔案）"
+                    elif "未找到任何影像檔案" in error_msg:
+                        error_msg = "資料夾存在但沒有影像檔案"
+                    
+                    result_text += f"- {failed['filename']}: {error_msg}\n"
             
             return result_text
             
@@ -248,8 +255,9 @@ class ModelTrainer:
             true_positive_dir = dataset_dir / "true_positive"
             false_positive_dir = dataset_dir / "false_positive"
             
-            if not true_positive_dir.exists() or not false_positive_dir.exists():
-                return {"valid": False, "error": "缺少 true_positive 或 false_positive 資料夾"}
+            # 至少要有其中一個資料夾存在（允許單一類別資料集）
+            if not true_positive_dir.exists() and not false_positive_dir.exists():
+                return {"valid": False, "error": "缺少 true_positive 和 false_positive 資料夾"}
             
             # 統計事件和影像數量
             true_events = list(true_positive_dir.iterdir()) if true_positive_dir.exists() else []
@@ -282,6 +290,10 @@ class ModelTrainer:
             source_false_dir = source_dataset_dir / "false_positive"
             target_true_dir = target_dataset_dir / "true_positive"
             target_false_dir = target_dataset_dir / "false_positive"
+            
+            # 確保目標目錄存在
+            target_true_dir.mkdir(exist_ok=True)
+            target_false_dir.mkdir(exist_ok=True)
             
             # 合併 true_positive 事件
             if source_true_dir.exists():

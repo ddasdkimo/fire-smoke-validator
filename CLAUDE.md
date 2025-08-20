@@ -17,7 +17,12 @@ pip install -r requirements.txt
 
 # Development mode installation (optional)
 pip install -e .
+
+# Docker environment (alternative)
+pip install -r requirements-docker.txt
 ```
+
+**Note**: The project includes a `setup.py` for packaging as "temporal_classification_model" - a package for temporal fire/smoke classification models.
 
 ### Code Quality
 ```bash
@@ -82,6 +87,7 @@ app.py (63 lines) → Bootstraps the application
 - **Export**: Structured dataset export as ZIP files
 - **Temporal Classification**: Deep learning models for time-series fire/smoke analysis
 - **Model Training**: Built-in training pipeline with multiple backbone architectures
+- **Heatmap Visualization**: Grad-CAM and attention weight visualization for model interpretability
 - **Acceleration**: Supports Mac MPS, CUDA, and CPU inference
 
 ### Data Flow
@@ -104,7 +110,8 @@ app.py (63 lines) → Bootstraps the application
 1. Load trained temporal classification model
 2. Upload video for temporal analysis
 3. Generate classification results with confidence scores
-4. Export inference results
+4. Generate Grad-CAM heatmaps and attention visualizations
+5. Export inference results with visual analysis
 
 ### Output Structure
 
@@ -133,10 +140,15 @@ runs/
 #### Inference Output
 ```
 inference_workspace/
-└── inference_YYYYMMDD_HHMMSS/
-    ├── results.json           # Classification results
-    ├── confidence_scores.csv  # Detailed confidence scores
-    └── visualizations/        # Result visualizations
+├── inference_YYYYMMDD_HHMMSS/
+│   ├── results.json           # Classification results
+│   ├── confidence_scores.csv  # Detailed confidence scores
+│   └── visualizations/        # Result visualizations
+└── heatmaps_YYYYMMDD_HHMMSS/  # Heatmap visualizations
+    ├── gradcam_frame_1.jpg    # Individual frame heatmaps
+    ├── gradcam_frame_2.jpg
+    ├── gradcam_frame_3.jpg
+    └── combined_heatmap.jpg   # Combined visualization
 ```
 
 ## Important Parameters
@@ -156,6 +168,17 @@ The project contains multiple entry points:
 - `app_three_tabs.py`: **Comprehensive three-tab system with labeling/training/inference**
 - `start_reid_labeling.py`: Alternative ReID labeling interface
 
+### Debugging and Testing Scripts
+
+```bash
+# Test inference functionality
+python test_inference_fix.py       # Test inference workflow fixes
+python test_inference_grid.py      # Test inference grid display
+python test_actual_training.py     # Test complete training pipeline
+python test_ui_fixes.py            # Test UI component fixes
+python test_chinese_text.py        # Test Chinese text display support
+```
+
 ### Training Progress Monitoring
 
 When training is in progress, monitor status through:
@@ -169,6 +192,52 @@ When training is in progress, monitor status through:
 ```bash
 export PYTORCH_ENABLE_MPS_FALLBACK=1  # Allow MPS fallback to CPU
 export OMP_NUM_THREADS=4              # Limit thread count
+```
+
+## Docker Deployment
+
+The project includes Docker support for containerized deployment:
+
+```bash
+# Build and run with Docker Compose
+docker-compose up --build
+
+# Manual Docker build
+docker build -t fire-smoke-validator .
+```
+
+See `docker-deploy.md` and `Dockerfile` for detailed deployment instructions. The `requirements-docker.txt` contains Docker-specific dependencies.
+
+## Heatmap Visualization Features
+
+The system now includes advanced visualization capabilities for model interpretability:
+
+### Grad-CAM Heatmaps
+- **Purpose**: Shows which parts of the input images the model focuses on for classification
+- **Implementation**: `GradCAMVisualizer` class in `core/inference.py`
+- **Output**: Individual frame heatmaps and combined visualizations
+- **Usage**: Automatically generated during temporal model inference
+
+### Attention Weight Visualization
+- **Purpose**: Displays attention mechanism weight distributions
+- **Implementation**: `AttentionVisualizer` class in `core/inference.py`  
+- **Output**: Attention maps for temporal fusion layers
+- **Usage**: Captures attention weights during forward pass
+
+### Visualization Features
+- 🎯 **Individual Frame Heatmaps**: Each input frame with Grad-CAM overlay
+- 📊 **Combined Visualization**: Side-by-side comparison of original frames and heatmaps
+- 🔥 **Color-coded Intensity**: Red/orange areas indicate high model attention, blue areas indicate low attention
+- 📁 **Automatic Saving**: All heatmaps saved to `inference_workspace/heatmaps_*` directories
+- 🖼️ **Gallery Integration**: Heatmaps accessible through `get_heatmap_gallery()` method
+
+### Heatmap Output Structure
+```
+inference_workspace/heatmaps_YYYYMMDD_HHMMSS/
+├── gradcam_frame_1.jpg        # Frame 1 with heatmap overlay
+├── gradcam_frame_2.jpg        # Frame 2 with heatmap overlay  
+├── gradcam_frame_3.jpg        # Frame 3 with heatmap overlay
+└── combined_heatmap.jpg       # Comprehensive visualization
 ```
 
 ## Temporal Classification Models
@@ -202,6 +271,16 @@ ps aux | grep python | grep training
 
 # Monitor GPU usage (if available)
 watch -n 1 nvidia-smi
+
+# Debugging and state management utilities
+python debug_training.py           # Debug training functionality and models
+python check_training_state.py     # Check current training status
+python create_training_state.py    # Create mock training completion state
+
+# Test heatmap visualization functionality
+python test_heatmap_impl.py        # Check heatmap implementation completeness
+python test_heatmap_basic.py       # Basic heatmap functionality test
+python test_heatmap_generation.py  # Full heatmap generation test (requires CV2)
 ```
 
 ## Current Status
@@ -214,5 +293,8 @@ watch -n 1 nvidia-smi
 - ✅ Three-tab system with training/inference capabilities
 - ✅ Temporal classification model training pipeline
 - ✅ Multiple backbone architecture support
+- ✅ Grad-CAM heatmap visualization for model interpretability
+- ✅ Attention weight visualization system
+- ✅ Automatic heatmap generation during inference
 - ⚠️ No formal test framework setup (pytest in requirements but no tests/ directory)
 - 🔄 Active refactoring - multiple app versions coexist

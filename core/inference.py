@@ -20,15 +20,129 @@ except ImportError:
 
 try:
     import torch
+    import torch.nn.functional as F
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
 
 try:
     from ultralytics import YOLO
     ULTRALYTICS_AVAILABLE = True
 except ImportError:
     ULTRALYTICS_AVAILABLE = False
+
+
+class GradCAMVisualizer:
+    """Grad-CAM 視覺化工具"""
+    
+    def __init__(self, model):
+        self.model = model
+        self.target_layers = []
+        self.gradients = []
+        self.activations = []
+        
+        # 註冊 hook 到目標層
+        self._register_hooks()
+    
+    def _register_hooks(self):
+        """註冊 forward 和 backward hooks"""
+        # 找到backbone的最後一個卷積層
+        target_layer = None
+        
+        # 遍歷模型尋找合適的特徵層
+        for name, module in self.model.named_modules():
+            if 'backbone' in name and hasattr(module, 'weight') and len(module.weight.shape) == 4:
+                target_layer = module
+        
+        if target_layer is not None:
+            # 註冊 forward hook
+            target_layer.register_forward_hook(self._forward_hook)
+            # 註冊 backward hook
+            target_layer.register_full_backward_hook(self._backward_hook)
+    
+    def _forward_hook(self, module, input, output):
+        """Forward hook 儲存激活值"""
+        self.activations = output.detach()
+    
+    def _backward_hook(self, module, grad_input, grad_output):
+        """Backward hook 儲存梯度"""
+        self.gradients = grad_output[0].detach()
+    
+    def generate_cam(self, input_tensor, target_class=None):
+        """生成 Class Activation Map"""
+        try:
+            self.model.eval()
+            
+            # Forward pass
+            output = self.model(input_tensor)
+            
+            if target_class is None:
+                target_class = torch.argmax(output, dim=1)
+            
+            # Backward pass
+            self.model.zero_grad()
+            class_loss = output[0, target_class]
+            class_loss.backward(retain_graph=True)
+            
+            # 計算 Grad-CAM
+            if len(self.gradients) > 0 and len(self.activations) > 0:
+                # 池化梯度得到權重
+                weights = torch.mean(self.gradients, dim=[2, 3], keepdim=True)
+                
+                # 加權組合特徵圖
+                cam = torch.sum(weights * self.activations, dim=1, keepdim=True)
+                cam = F.relu(cam)  # ReLU activation
+                
+                # 正歸化到 0-1
+                cam = cam - cam.min()
+                cam = cam / (cam.max() + 1e-8)
+                
+                return cam.squeeze().cpu().numpy()
+            
+        except Exception as e:
+            print(f"生成 Grad-CAM 時發生錯誤: {e}")
+            
+        return None
+
+
+class AttentionVisualizer:
+    """注意力權重視覺化工具"""
+    
+    def __init__(self, model):
+        self.model = model
+        self.attention_weights = {}
+        
+        # 註冊 hook 到注意力層
+        self._register_attention_hooks()
+    
+    def _register_attention_hooks(self):
+        """註冊注意力層的 hooks"""
+        for name, module in self.model.named_modules():
+            # 尋找注意力模組
+            if 'attention' in name.lower() or 'attn' in name.lower():
+                module.register_forward_hook(
+                    lambda module, input, output, name=name: self._attention_hook(name, output)
+                )
+    
+    def _attention_hook(self, name, output):
+        """儲存注意力權重"""
+        if isinstance(output, tuple):
+            # 通常注意力模組會返回 (output, attention_weights)
+            if len(output) > 1:
+                self.attention_weights[name] = output[1].detach().cpu()
+        elif hasattr(output, 'attention_weights'):
+            self.attention_weights[name] = output.attention_weights.detach().cpu()
+    
+    def get_attention_maps(self):
+        """取得注意力地圖"""
+        return self.attention_weights
 
 
 class ModelInference:
@@ -45,6 +159,10 @@ class ModelInference:
         
         # 推論結果
         self.inference_results = []
+        
+        # 視覺化工具
+        self.gradcam_visualizer = None
+        self.attention_visualizer = None
     
     def get_available_models(self):
         """取得可用的時序模型列表"""
@@ -120,6 +238,10 @@ class ModelInference:
             
             self.current_model = load_temporal_model(model_path, device)
             self.current_model_path = model_path
+            
+            # 初始化視覺化工具
+            self.gradcam_visualizer = GradCAMVisualizer(self.current_model)
+            self.attention_visualizer = AttentionVisualizer(self.current_model)
             
             # 取得模型資訊
             model_info = self.current_model.get_model_info()
@@ -230,6 +352,9 @@ class ModelInference:
                     predicted_class = torch.argmax(probabilities, dim=1).item()
                     confidence = probabilities[0][predicted_class].item()
                 
+                # 生成熱區圖 (需要梯度，所以重新計算)
+                heatmaps = self._generate_heatmaps(temporal_input, predicted_class)
+                
                 # 類別映射
                 class_names = {0: "false_positive", 1: "true_positive"}
                 predicted_label = class_names.get(predicted_class, f"class_{predicted_class}")
@@ -243,6 +368,11 @@ class ModelInference:
                 output_path = self.inference_dir / output_filename
                 cv2.imwrite(str(output_path), grid_image)
                 
+                # 生成和儲存熱區圖視覺化
+                heatmap_paths = self._save_heatmap_visualizations(
+                    frames, heatmaps, predicted_label, confidence, timestamp
+                )
+                
                 sequence_result = {
                     "sequence_id": f"temporal_sequence_{timestamp}",
                     "input_frames": [Path(f.name).name for f in valid_files],
@@ -254,6 +384,8 @@ class ModelInference:
                         "true_positive": float(probabilities[0][1])
                     },
                     "result_image_path": str(output_path),
+                    "heatmap_paths": heatmap_paths,  # 新增熱區圖路徑
+                    "has_heatmaps": len(heatmap_paths) > 0,  # 標記是否有熱區圖
                     "total_frames": len(frames),
                     "processed_frames": 5  # 固定處理5幀
                 }
@@ -263,6 +395,10 @@ class ModelInference:
                 # 生成詳細摘要
                 status_emoji = "🔥" if predicted_label == "true_positive" else "✅"
                 result_name = "真實火煙事件" if predicted_label == "true_positive" else "非火煙事件"
+                
+                # 熱區圖狀態
+                heatmap_status = "✅ 已生成" if len(heatmap_paths) > 0 else "❌ 未生成"
+                heatmap_info = f"- 🔥 熱區圖: {heatmap_status} ({len(heatmap_paths)} 個檔案)" if len(heatmap_paths) > 0 else "- 🔥 熱區圖: 生成失敗或不支援"
                 
                 summary = f"""{status_emoji} 時序模型推論完成！
 
@@ -284,6 +420,12 @@ class ModelInference:
 💾 結果檔案:
 - 視覺化結果: {Path(output_path).name}
 - 完整路徑: {output_path}
+{heatmap_info}
+
+🔬 視覺化說明:
+- Grad-CAM 熱區圖顯示模型關注的影像區域
+- 紅色區域表示高關注度，藍色區域表示低關注度
+- 組合圖展示原始幀與熱區圖的對比
 
 📅 分析時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -301,6 +443,183 @@ class ModelInference:
                 
         except ImportError:
             return "❌ 缺少時序模型相關依賴", []
+    
+    def _generate_heatmaps(self, temporal_input, predicted_class):
+        """生成熱區圖"""
+        heatmaps = {}
+        
+        try:
+            if self.gradcam_visualizer and TORCH_AVAILABLE:
+                # 生成 Grad-CAM
+                cam = self.gradcam_visualizer.generate_cam(temporal_input, predicted_class)
+                if cam is not None:
+                    heatmaps['gradcam'] = cam
+            
+            if self.attention_visualizer:
+                # 生成注意力地圖
+                attention_maps = self.attention_visualizer.get_attention_maps()
+                if attention_maps:
+                    heatmaps['attention'] = attention_maps
+        
+        except Exception as e:
+            print(f"生成熱區圖時發生錯誤: {e}")
+        
+        return heatmaps
+    
+    def _create_heatmap_overlay(self, image, heatmap, alpha=0.4, colormap='jet'):
+        """將熱區圖疊加到原始影像上"""
+        try:
+            if not MATPLOTLIB_AVAILABLE:
+                return image
+            
+            # 調整熱區圖大小到影像尺寸
+            h, w = image.shape[:2]
+            heatmap_resized = cv2.resize(heatmap, (w, h))
+            
+            # 使用 matplotlib colormap
+            cmap = cm.get_cmap(colormap)
+            heatmap_colored = cmap(heatmap_resized)[:, :, :3]  # 移除 alpha 通道
+            heatmap_colored = (heatmap_colored * 255).astype(np.uint8)
+            
+            # 將 RGB 轉為 BGR (OpenCV 格式)
+            heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_RGB2BGR)
+            
+            # 混合原始影像和熱區圖
+            overlay = cv2.addWeighted(image, 1-alpha, heatmap_colored, alpha, 0)
+            
+            return overlay
+            
+        except Exception as e:
+            print(f"建立熱區圖疊加時發生錯誤: {e}")
+            return image
+    
+    def _save_heatmap_visualizations(self, frames, heatmaps, predicted_label, confidence, timestamp):
+        """儲存熱區圖視覺化結果"""
+        visualization_paths = []
+        
+        try:
+            # 建立熱區圖目錄
+            heatmap_dir = self.inference_dir / f"heatmaps_{timestamp}"
+            heatmap_dir.mkdir(exist_ok=True)
+            
+            if 'gradcam' in heatmaps and len(frames) > 0:
+                cam = heatmaps['gradcam']
+                
+                # 為每個幀生成熱區圖
+                for i, frame in enumerate(frames[:5]):  # 限制5幀
+                    # 建立疊加圖
+                    overlay = self._create_heatmap_overlay(frame, cam, alpha=0.4)
+                    
+                    # 儲存單獨的熱區圖
+                    heatmap_path = heatmap_dir / f"gradcam_frame_{i+1}.jpg"
+                    cv2.imwrite(str(heatmap_path), overlay)
+                    visualization_paths.append(str(heatmap_path))
+                
+                # 建立組合視覺化
+                combined_viz = self._create_combined_heatmap_visualization(
+                    frames, cam, predicted_label, confidence, timestamp
+                )
+                combined_path = heatmap_dir / "combined_heatmap.jpg"
+                cv2.imwrite(str(combined_path), combined_viz)
+                visualization_paths.append(str(combined_path))
+            
+            return visualization_paths
+            
+        except Exception as e:
+            print(f"儲存熱區圖視覺化時發生錯誤: {e}")
+            return []
+    
+    def _create_combined_heatmap_visualization(self, frames, heatmap, predicted_label, confidence, timestamp):
+        """建立組合的熱區圖視覺化"""
+        try:
+            # 限制顯示的幀數
+            display_frames = frames[:3] if len(frames) > 3 else frames
+            
+            # 調整每幀大小
+            target_size = (200, 200)
+            
+            # 建立原始幀和熱區圖疊加幀
+            original_frames = []
+            heatmap_frames = []
+            
+            for frame in display_frames:
+                # 原始幀
+                resized_original = cv2.resize(frame, target_size)
+                original_frames.append(resized_original)
+                
+                # 熱區圖疊加幀
+                overlay = self._create_heatmap_overlay(resized_original, heatmap, alpha=0.5)
+                heatmap_frames.append(overlay)
+            
+            # 建立組合畫布
+            padding = 15
+            header_height = 80
+            footer_height = 40
+            
+            canvas_width = target_size[0] * len(display_frames) * 2 + padding * (len(display_frames) * 2 + 1)
+            canvas_height = target_size[1] + header_height + footer_height
+            
+            canvas = np.ones((canvas_height, canvas_width, 3), dtype=np.uint8) * 245
+            
+            # 添加標題背景
+            cv2.rectangle(canvas, (0, 0), (canvas_width, header_height), (60, 60, 60), -1)
+            
+            # 添加標題
+            title_text = "Grad-CAM Heatmap Visualization"
+            cv2.putText(canvas, title_text, (20, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            
+            # 添加預測結果
+            result_color = (0, 255, 0) if predicted_label == "true_positive" else (0, 165, 255)
+            result_text = f"Prediction: {'Fire/Smoke' if predicted_label == 'true_positive' else 'No Fire/Smoke'}"
+            confidence_text = f"Confidence: {confidence:.3f}"
+            
+            cv2.putText(canvas, result_text, (20, 55),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, result_color, 2)
+            cv2.putText(canvas, confidence_text, (400, 55),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # 放置幀 - 原始幀和熱區圖並排
+            y_start = header_height + 10
+            
+            for i in range(len(display_frames)):
+                # 原始幀位置
+                orig_x = padding + i * (target_size[0] * 2 + padding)
+                # 熱區圖位置  
+                heat_x = orig_x + target_size[0] + 5
+                
+                # 放置原始幀
+                canvas[y_start:y_start+target_size[1], orig_x:orig_x+target_size[0]] = original_frames[i]
+                
+                # 放置熱區圖
+                canvas[y_start:y_start+target_size[1], heat_x:heat_x+target_size[0]] = heatmap_frames[i]
+                
+                # 添加標籤
+                cv2.putText(canvas, f"Original {i+1}", (orig_x, y_start-8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (80, 80, 80), 1)
+                cv2.putText(canvas, f"Grad-CAM {i+1}", (heat_x, y_start-8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (80, 80, 80), 1)
+                
+                # 添加白色邊框
+                cv2.rectangle(canvas, (orig_x-1, y_start-1), 
+                             (orig_x+target_size[0]+1, y_start+target_size[1]+1), 
+                             (255, 255, 255), 2)
+                cv2.rectangle(canvas, (heat_x-1, y_start-1), 
+                             (heat_x+target_size[0]+1, y_start+target_size[1]+1), 
+                             (255, 255, 255), 2)
+            
+            # 添加底部說明
+            footer_y = y_start + target_size[1] + 15
+            info_text = "Left: Original frames, Right: Grad-CAM heatmap overlay"
+            cv2.putText(canvas, info_text, (20, footer_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+            
+            return canvas
+            
+        except Exception as e:
+            print(f"建立組合熱區圖視覺化時發生錯誤: {e}")
+            # 回傳第一幀作為備選
+            return frames[0] if frames else np.zeros((224, 224, 3), dtype=np.uint8)
     
     
     def _create_temporal_result_grid(self, frames, predicted_label, confidence):
@@ -568,11 +887,32 @@ class ModelInference:
             # 檢查時序模型結果
             if "result_image_path" in result and Path(result["result_image_path"]).exists():
                 gallery_paths.append(result["result_image_path"])
+            
+            # 添加熱區圖路徑
+            if "heatmap_paths" in result and result["heatmap_paths"]:
+                for heatmap_path in result["heatmap_paths"]:
+                    if Path(heatmap_path).exists():
+                        gallery_paths.append(heatmap_path)
+            
             # 檢查其他模型結果
             elif "annotated_image_path" in result and Path(result["annotated_image_path"]).exists():
                 gallery_paths.append(result["annotated_image_path"])
         
         return gallery_paths
+    
+    def get_heatmap_gallery(self):
+        """取得熱區圖專用畫廊"""
+        if not self.inference_results:
+            return []
+        
+        heatmap_paths = []
+        for result in self.inference_results:
+            if "heatmap_paths" in result and result["heatmap_paths"]:
+                for path in result["heatmap_paths"]:
+                    if Path(path).exists():
+                        heatmap_paths.append(path)
+        
+        return heatmap_paths
     
     def clear_inference_results(self):
         """清除推論結果"""
