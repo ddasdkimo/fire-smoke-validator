@@ -5,14 +5,19 @@
 echo "🔄 切換到重構版本..."
 
 # 備份舊版本
-if [ ! -f "app_old.py" ]; then
+if [ ! -f "archive/app_old.py" ]; then
     echo "📁 備份舊版本..."
-    mv app.py app_old.py
+    mkdir -p archive
+    cp app.py archive/app_old.py
 fi
 
 # 啟用新版本
 echo "✨ 啟用新版本..."
-cp app_new.py app.py
+if [ -f "archive/app_new.py" ]; then
+    cp archive/app_new.py app.py
+else
+    echo "⚠️ 使用當前模組化版本 app.py"
+fi
 
 echo "✅ 切換完成！"
 echo ""

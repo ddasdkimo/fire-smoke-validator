@@ -46,39 +46,51 @@ python app.py
 
 # Alternative applications
 python app_three_tabs.py    # Three-tab system with training/inference
-python start_reid_labeling.py    # Alternative ReID labeling interface
+
+# Application launcher (used by Docker)
+python start.py              # Interactive launcher
+python start.py original     # Launch simple labeling interface
+python start.py three-tabs   # Launch comprehensive system
 ```
 
 ### Version Switching
 ```bash
 ./switch-to-new.sh    # Switch to modular version
-./switch-to-old.sh    # Switch to monolithic version
+./switch-to-old.sh    # Switch to monolithic version (from archive/)
+```
+
+## Project Structure
+
+```
+fire-smoke-validator/
+├── app.py                       # Main simplified labeling interface
+├── app_three_tabs.py           # Comprehensive three-tab system
+├── start.py                     # Application launcher (for Docker)
+├── core/                       # Core business logic modules
+│   ├── analyzer.py            # Video processing, YOLO detection, ReID grouping
+│   ├── labeling.py            # Label management, progress tracking, data export
+│   ├── inference.py           # Temporal classification inference + heatmaps
+│   ├── training.py            # Model training pipeline
+│   └── models/                # Deep learning models
+│       ├── data_utils.py      # Dataset utilities and preprocessing
+│       ├── temporal_classifier.py # Time-series classification models
+│       └── temporal_trainer.py # Training pipeline for temporal models
+├── ui/                        # User interface components
+│   ├── builder.py             # Gradio interface construction
+│   ├── builder_new.py         # Three-tab interface with training/inference
+│   ├── interface.py           # User interaction logic
+│   ├── training_controller.py # Training workflow management
+│   └── inference_controller.py # Inference workflow management
+├── tests/                     # Testing and debugging utilities
+├── archive/                   # Archived legacy versions
+└── docs/                     # Documentation files
 ```
 
 ## Architecture Overview
 
 ### Core Components
 
-The system follows a modular architecture with clear separation between core logic and UI:
-
-```
-app.py (63 lines) → Bootstraps the application
-├── core/
-│   ├── analyzer.py      → Video processing, YOLO detection, ReID grouping
-│   ├── labeling.py      → Label management, progress tracking, data export
-│   ├── inference.py     → Temporal classification inference
-│   ├── training.py      → Model training pipeline
-│   └── models/          → Deep learning models for temporal classification
-│       ├── data_utils.py       → Dataset utilities and preprocessing
-│       ├── temporal_classifier.py → Time-series classification models
-│       └── temporal_trainer.py → Training pipeline for temporal models
-└── ui/
-    ├── builder.py              → Gradio interface construction
-    ├── builder_new.py          → Three-tab interface with training/inference
-    ├── interface.py            → User interaction logic
-    ├── training_controller.py  → Training workflow management
-    └── inference_controller.py → Inference workflow management
-```
+The system follows a modular architecture with clear separation between core logic and UI. The main applications are lightweight bootstrapping scripts that coordinate between the `core/` business logic modules and `ui/` interface components.
 
 ### Key Features
 - **Detection**: Ultralytics YOLO (pretrained model at `best.pt`)
@@ -163,20 +175,21 @@ Adjustable parameters in the codebase:
 
 The project contains multiple entry points:
 - `app.py`: Main simplified labeling interface (modular version)
-- `app_old.py`: Original monolithic version (1200+ lines)  
-- `app_new.py`: Intermediate refactored version
 - `app_three_tabs.py`: **Comprehensive three-tab system with labeling/training/inference**
-- `start_reid_labeling.py`: Alternative ReID labeling interface
+- `start.py`: Application launcher with version selection (required for Docker)
+
+**Archived versions** (moved to `archive/`):
+- `archive/app_old.py`: Original monolithic version (1200+ lines)  
+- `archive/app_new.py`: Intermediate refactored version
+- `archive/start_reid_labeling.py`: Alternative ReID labeling interface
+- `archive/tools/`: Legacy labeling tools
 
 ### Debugging and Testing Scripts
 
 ```bash
-# Test inference functionality
-python test_inference_fix.py       # Test inference workflow fixes
-python test_inference_grid.py      # Test inference grid display
-python test_actual_training.py     # Test complete training pipeline
-python test_ui_fixes.py            # Test UI component fixes
-python test_chinese_text.py        # Test Chinese text display support
+# Test inference functionality (moved to tests/)
+python tests/test_inference_fix.py       # Test inference workflow fixes
+python tests/test_actual_training.py     # Test complete training pipeline
 ```
 
 ### Training Progress Monitoring
@@ -272,15 +285,10 @@ ps aux | grep python | grep training
 # Monitor GPU usage (if available)
 watch -n 1 nvidia-smi
 
-# Debugging and state management utilities
-python debug_training.py           # Debug training functionality and models
-python check_training_state.py     # Check current training status
-python create_training_state.py    # Create mock training completion state
-
-# Test heatmap visualization functionality
-python test_heatmap_impl.py        # Check heatmap implementation completeness
-python test_heatmap_basic.py       # Basic heatmap functionality test
-python test_heatmap_generation.py  # Full heatmap generation test (requires CV2)
+# Debugging and state management utilities (moved to tests/)
+python tests/debug_training.py           # Debug training functionality and models
+python tests/check_training_state.py     # Check current training status
+python tests/create_training_state.py    # Create mock training completion state
 ```
 
 ## Current Status
