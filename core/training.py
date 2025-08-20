@@ -524,12 +524,26 @@ class ModelTrainer:
                         epochs=epochs,
                         batch_size=batch_size,
                         learning_rate=1e-3,
-                        val_split=0.2
+                        val_split=0.2,
+                        test_split=0.1
                     )
                     
                     print(f"✅ [TRAINING-WORKER] 訓練完成！結果: {result}")
                     self.training_results = result
-                    self.training_progress = f"✅ 時序模型訓練完成！最佳準確率: {result['best_val_accuracy']:.3f}"
+                    
+                    # 構建訓練完成訊息，包含TensorBoard資訊
+                    completion_message = f"✅ 時序模型訓練完成！\n"
+                    completion_message += f"📊 最佳驗證準確率: {result['best_val_accuracy']:.3f}\n"
+                    completion_message += f"📈 最終訓練準確率: {result['final_train_accuracy']:.3f}\n"
+                    
+                    if 'test_accuracy' in result:
+                        completion_message += f"🧪 測試集準確率: {result['test_accuracy']:.3f}\n"
+                    
+                    if result.get('tensorboard_path'):
+                        completion_message += f"\n📊 TensorBoard 可用:\n"
+                        completion_message += f"   tensorboard --logdir={result['tensorboard_path']}"
+                    
+                    self.training_progress = completion_message
                     self.is_training = False
                     self._save_training_state()  # 保存最終狀態
                     

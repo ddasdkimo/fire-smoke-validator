@@ -19,6 +19,12 @@ from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 from datetime import datetime
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+except ImportError:
+    TENSORBOARD_AVAILABLE = False
+
 from .temporal_classifier import TemporalFireSmokeClassifier, DEFAULT_MODEL_CONFIGS
 from .data_utils import prepare_temporal_frames, create_temporal_batch
 
@@ -164,6 +170,7 @@ class TemporalTrainer:
         """
         self.model_config = model_config
         self.device = self._setup_device(device)
+        self.writer = None  # TensorBoard writer
         
         # 建立模型 - 過濾掉不需要的參數
         valid_model_params = {
@@ -200,18 +207,20 @@ class TemporalTrainer:
                      dataset_path: str,
                      batch_size: int = 16,
                      val_split: float = 0.2,
-                     num_workers: int = 4) -> Tuple[DataLoader, DataLoader]:
+                     test_split: float = 0.1,
+                     num_workers: int = 4) -> Tuple[DataLoader, DataLoader, DataLoader]:
         """
-        準備訓練和驗證資料
+        準備訓練、驗證和測試資料
         
         Args:
             dataset_path: 資料集路徑
             batch_size: 批次大小
             val_split: 驗證集比例
+            test_split: 測試集比例
             num_workers: 資料載入工作進程數
         
         Returns:
-            Tuple[DataLoader, DataLoader]: (train_loader, val_loader)
+            Tuple[DataLoader, DataLoader, DataLoader]: (train_loader, val_loader, test_loader)
         """
         # 建立資料集
         full_dataset = TemporalFireSmokeDataset(
@@ -220,18 +229,25 @@ class TemporalTrainer:
             training=True
         )
         
-        # 分割訓練和驗證集
-        val_size = int(len(full_dataset) * val_split)
-        train_size = len(full_dataset) - val_size
+        # 分割訓練、驗證和測試集
+        total_size = len(full_dataset)
+        test_size = int(total_size * test_split)
+        val_size = int(total_size * val_split)
+        train_size = total_size - val_size - test_size
         
-        train_dataset, val_dataset = random_split(
+        # 確保分割大小合理
+        if train_size <= 0:
+            raise ValueError(f"訓練集大小為 {train_size}，請調整分割比例")
+        
+        train_dataset, val_dataset, test_dataset = random_split(
             full_dataset, 
-            [train_size, val_size],
+            [train_size, val_size, test_size],
             generator=torch.Generator().manual_seed(42)
         )
         
-        # 設定驗證集為非訓練模式
-        val_dataset.dataset.training = False
+        # 設定驗證集和測試集為非訓練模式
+        val_dataset.dataset.training = False  
+        test_dataset.dataset.training = False
         
         # 建立 DataLoader
         train_loader = DataLoader(
@@ -250,9 +266,16 @@ class TemporalTrainer:
             pin_memory=True if self.device.type == 'cuda' else False
         )
         
-        print(f"📊 資料分割: 訓練 {len(train_dataset)}, 驗證 {len(val_dataset)}")
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True if self.device.type == 'cuda' else False
+        )
         
-        return train_loader, val_loader
+        print(f"📊 資料集分割: 訓練集 {len(train_dataset)}, 驗證集 {len(val_dataset)}, 測試集 {len(test_dataset)}")
+        return train_loader, val_loader, test_loader
     
     def train(self,
               dataset_path: str,
@@ -261,6 +284,7 @@ class TemporalTrainer:
               learning_rate: float = 1e-3,
               weight_decay: float = 1e-4,
               val_split: float = 0.2,
+              test_split: float = 0.1,
               save_dir: str = 'runs/temporal_training') -> Dict[str, Any]:
         """
         訓練模型
@@ -272,6 +296,7 @@ class TemporalTrainer:
             learning_rate: 學習率
             weight_decay: 權重衰減
             val_split: 驗證集比例
+            test_split: 測試集比例
             save_dir: 儲存目錄
         
         Returns:
@@ -281,9 +306,29 @@ class TemporalTrainer:
         save_path = Path(save_dir) / f"temporal_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         save_path.mkdir(parents=True, exist_ok=True)
         
+        # 初始化 TensorBoard
+        if TENSORBOARD_AVAILABLE:
+            self.writer = SummaryWriter(log_dir=str(save_path / 'tensorboard'))
+            print(f"📊 TensorBoard 日志保存在: {save_path / 'tensorboard'}")
+            
+            # 記錄模型配置
+            self.writer.add_text('Config/Model', str(self.model_config))
+            self.writer.add_text('Config/Training', f"""
+            - Dataset: {dataset_path}
+            - Epochs: {epochs}
+            - Batch Size: {batch_size}
+            - Learning Rate: {learning_rate}
+            - Weight Decay: {weight_decay}
+            - Validation Split: {val_split}
+            - Test Split: {test_split}
+            - Device: {self.device}
+            """)
+        else:
+            print("⚠️ TensorBoard 不可用，跳過日志記錄")
+        
         # 準備資料
-        train_loader, val_loader = self.prepare_data(
-            dataset_path, batch_size, val_split
+        train_loader, val_loader, test_loader = self.prepare_data(
+            dataset_path, batch_size, val_split, test_split
         )
         
         # 設定優化器和損失函數
@@ -322,25 +367,95 @@ class TemporalTrainer:
             self.training_history['val_loss'].append(val_loss)
             self.training_history['val_acc'].append(val_acc)
             
+            # 記錄到 TensorBoard
+            if self.writer:
+                self.writer.add_scalar('Loss/Train', train_loss, epoch)
+                self.writer.add_scalar('Loss/Validation', val_loss, epoch)
+                self.writer.add_scalar('Accuracy/Train', train_acc, epoch)
+                self.writer.add_scalar('Accuracy/Validation', val_acc, epoch)
+                self.writer.add_scalar('Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
+                
+                # 記錄模型參數分佈 (每10個epoch記錄一次)
+                if epoch % 10 == 0:
+                    for name, param in self.model.named_parameters():
+                        if param.grad is not None:
+                            self.writer.add_histogram(f'Parameters/{name}', param, epoch)
+                            self.writer.add_histogram(f'Gradients/{name}', param.grad, epoch)
+            
             # 儲存最佳模型
-            if val_acc > self.best_val_acc:
+            is_best = val_acc > self.best_val_acc
+            if is_best:
                 self.best_val_acc = val_acc
                 self._save_model(save_path / 'best_model.pth')
+                
+                # 在 TensorBoard 中標記最佳準確率
+                if self.writer:
+                    self.writer.add_scalar('Best/Validation_Accuracy', val_acc, epoch)
             
             # 印出進度
             print(f"Epoch {epoch+1}/{epochs}: "
                   f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
-                  f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+                  f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}"
+                  f"{' 🌟 (New Best!)' if is_best else ''}")
+        
+        # 在最佳模型上進行測試集評估
+        print(f"🧪 在測試集上評估最佳模型...")
+        self._load_model(save_path / 'best_model.pth')
+        test_loss, test_acc = self._validate_epoch(test_loader, criterion)
+        print(f"📊 測試集結果: Loss: {test_loss:.4f}, Accuracy: {test_acc:.4f}")
         
         # 儲存最終模型和訓練歷史
         self._save_model(save_path / 'final_model.pth')
         self._save_training_history(save_path)
         self._plot_training_curves(save_path)
         
+        # 記錄最終結果到 TensorBoard
+        if self.writer:
+            # 記錄最終準確率
+            self.writer.add_scalar('Final/Best_Validation_Accuracy', self.best_val_acc, epochs)
+            self.writer.add_scalar('Final/Final_Train_Accuracy', self.training_history['train_acc'][-1], epochs)
+            self.writer.add_scalar('Final/Test_Accuracy', test_acc, epochs)
+            self.writer.add_scalar('Final/Test_Loss', test_loss, epochs)
+            
+            # 記錄訓練曲線圖片 (如果存在)
+            curves_path = save_path / 'training_curves.png'
+            if curves_path.exists():
+                try:
+                    import matplotlib.image as mpimg
+                    img = mpimg.imread(str(curves_path))
+                    self.writer.add_image('Training_Curves', img, 0, dataformats='HWC')
+                except Exception as e:
+                    print(f"⚠️ 無法添加訓練曲線圖片到 TensorBoard: {e}")
+            
+            # 記錄超參數
+            hparams = {
+                'backbone': self.model_config.get('backbone_name', 'unknown'),
+                'learning_rate': learning_rate,
+                'batch_size': batch_size,
+                'epochs': epochs,
+                'weight_decay': weight_decay,
+                'temporal_frames': self.model_config.get('temporal_frames', 5),
+            }
+            metrics = {
+                'best_val_accuracy': self.best_val_acc,
+                'final_train_accuracy': self.training_history['train_acc'][-1],
+                'test_accuracy': test_acc,
+                'test_loss': test_loss,
+            }
+            self.writer.add_hparams(hparams, metrics)
+            
+            # 關閉 writer
+            self.writer.close()
+            print(f"📊 TensorBoard 日志已保存，可使用以下命令查看:")
+            print(f"   tensorboard --logdir={save_path / 'tensorboard'}")
+        
         result = {
             'best_val_accuracy': self.best_val_acc,
             'final_train_accuracy': self.training_history['train_acc'][-1],
+            'test_accuracy': test_acc,
+            'test_loss': test_loss,
             'save_path': str(save_path),
+            'tensorboard_path': str(save_path / 'tensorboard') if TENSORBOARD_AVAILABLE else None,
             'model_info': self.model.get_model_info()
         }
         
@@ -411,6 +526,11 @@ class TemporalTrainer:
             'best_val_acc': self.best_val_acc,
             'training_history': self.training_history
         }, path)
+    
+    def _load_model(self, path: Path):
+        """載入模型"""
+        checkpoint = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
     
     def _save_training_history(self, save_dir: Path):
         """儲存訓練歷史"""

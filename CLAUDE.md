@@ -69,7 +69,7 @@ fire-smoke-validator/
 ├── core/                       # Core business logic modules
 │   ├── analyzer.py            # Video processing, YOLO detection, ReID grouping
 │   ├── labeling.py            # Label management, progress tracking, data export
-│   ├── inference.py           # Temporal classification inference + heatmaps
+│   ├── inference.py           # Temporal classification inference
 │   ├── training.py            # Model training pipeline
 │   └── models/                # Deep learning models
 │       ├── data_utils.py      # Dataset utilities and preprocessing
@@ -99,7 +99,7 @@ The system follows a modular architecture with clear separation between core log
 - **Export**: Structured dataset export as ZIP files
 - **Temporal Classification**: Deep learning models for time-series fire/smoke analysis
 - **Model Training**: Built-in training pipeline with multiple backbone architectures
-- **Heatmap Visualization**: Grad-CAM and attention weight visualization for model interpretability
+- **TensorBoard Integration**: Comprehensive training metrics and visualization logging
 - **Acceleration**: Supports Mac MPS, CUDA, and CPU inference
 
 ### Data Flow
@@ -122,8 +122,7 @@ The system follows a modular architecture with clear separation between core log
 1. Load trained temporal classification model
 2. Upload video for temporal analysis
 3. Generate classification results with confidence scores
-4. Generate Grad-CAM heatmaps and attention visualizations
-5. Export inference results with visual analysis
+4. Export inference results
 
 ### Output Structure
 
@@ -142,11 +141,14 @@ dataset/
 ```
 runs/
 └── temporal_training/
-    └── train_YYYYMMDD_HHMMSS/
+    └── temporal_YYYYMMDD_HHMMSS/
         ├── best_model.pth      # Best trained model
-        ├── config.yaml         # Training configuration
-        ├── training_log.txt    # Training progress log
-        └── metrics/            # Training metrics and plots
+        ├── final_model.pth     # Final trained model
+        ├── training_history.json # Training metrics data
+        ├── training_curves.png # Training/validation curves
+        └── tensorboard/        # TensorBoard logs
+            ├── events.out.tfevents.* # Training metrics
+            └── hparams.yaml    # Hyperparameter logs
 ```
 
 #### Inference Output
@@ -156,11 +158,6 @@ inference_workspace/
 │   ├── results.json           # Classification results
 │   ├── confidence_scores.csv  # Detailed confidence scores
 │   └── visualizations/        # Result visualizations
-└── heatmaps_YYYYMMDD_HHMMSS/  # Heatmap visualizations
-    ├── gradcam_frame_1.jpg    # Individual frame heatmaps
-    ├── gradcam_frame_2.jpg
-    ├── gradcam_frame_3.jpg
-    └── combined_heatmap.jpg   # Combined visualization
 ```
 
 ## Important Parameters
@@ -221,36 +218,42 @@ docker build -t fire-smoke-validator .
 
 See `docker-deploy.md` and `Dockerfile` for detailed deployment instructions. The `requirements-docker.txt` contains Docker-specific dependencies.
 
-## Heatmap Visualization Features
 
-The system now includes advanced visualization capabilities for model interpretability:
+## TensorBoard Integration
 
-### Grad-CAM Heatmaps
-- **Purpose**: Shows which parts of the input images the model focuses on for classification
-- **Implementation**: `GradCAMVisualizer` class in `core/inference.py`
-- **Output**: Individual frame heatmaps and combined visualizations
-- **Usage**: Automatically generated during temporal model inference
+The system includes comprehensive TensorBoard integration for training visualization and monitoring:
 
-### Attention Weight Visualization
-- **Purpose**: Displays attention mechanism weight distributions
-- **Implementation**: `AttentionVisualizer` class in `core/inference.py`  
-- **Output**: Attention maps for temporal fusion layers
-- **Usage**: Captures attention weights during forward pass
+### Training Metrics Logged
+- **Loss Tracking**: Training and validation loss over epochs
+- **Accuracy Monitoring**: Training, validation, and test accuracy
+- **Learning Rate**: Learning rate scheduling visualization
+- **Model Parameters**: Parameter and gradient histograms (every 10 epochs)
+- **Hyperparameters**: Complete hyperparameter tracking with hparams plugin
 
-### Visualization Features
-- 🎯 **Individual Frame Heatmaps**: Each input frame with Grad-CAM overlay
-- 📊 **Combined Visualization**: Side-by-side comparison of original frames and heatmaps
-- 🔥 **Color-coded Intensity**: Red/orange areas indicate high model attention, blue areas indicate low attention
-- 📁 **Automatic Saving**: All heatmaps saved to `inference_workspace/heatmaps_*` directories
-- 🖼️ **Gallery Integration**: Heatmaps accessible through `get_heatmap_gallery()` method
+### TensorBoard Features
+- 📊 **Real-time Monitoring**: Live training progress visualization
+- 📈 **Comprehensive Metrics**: Loss, accuracy, learning rate tracking
+- 🎯 **Best Model Tracking**: Automatic marking of best validation accuracy
+- 🧪 **Test Results**: Final test set evaluation metrics
+- ⚙️ **Hyperparameter Logging**: Complete training configuration tracking
+- 📷 **Training Curves**: Embedded training curve images
 
-### Heatmap Output Structure
-```
-inference_workspace/heatmaps_YYYYMMDD_HHMMSS/
-├── gradcam_frame_1.jpg        # Frame 1 with heatmap overlay
-├── gradcam_frame_2.jpg        # Frame 2 with heatmap overlay  
-├── gradcam_frame_3.jpg        # Frame 3 with heatmap overlay
-└── combined_heatmap.jpg       # Comprehensive visualization
+### Dataset Splitting
+- **Training Set**: 70% - Used for model parameter updates
+- **Validation Set**: 20% - Used for hyperparameter tuning and model selection
+- **Test Set**: 10% - Used for final unbiased performance evaluation
+
+The system automatically splits datasets and ensures no data leakage between sets.
+
+### Accessing TensorBoard
+```bash
+# For a specific training run
+tensorboard --logdir=runs/temporal_training/temporal_20250820_123456/tensorboard
+
+# For all training runs
+tensorboard --logdir=runs/temporal_training
+
+# The system will show the exact command after training completion
 ```
 
 ## Temporal Classification Models
@@ -285,6 +288,9 @@ ps aux | grep python | grep training
 # Monitor GPU usage (if available)
 watch -n 1 nvidia-smi
 
+# Launch TensorBoard for training visualization
+tensorboard --logdir=runs/temporal_training/temporal_*/tensorboard
+
 # Debugging and state management utilities (moved to tests/)
 python tests/debug_training.py           # Debug training functionality and models
 python tests/check_training_state.py     # Check current training status
@@ -301,8 +307,7 @@ python tests/create_training_state.py    # Create mock training completion state
 - ✅ Three-tab system with training/inference capabilities
 - ✅ Temporal classification model training pipeline
 - ✅ Multiple backbone architecture support
-- ✅ Grad-CAM heatmap visualization for model interpretability
-- ✅ Attention weight visualization system
-- ✅ Automatic heatmap generation during inference
+- ✅ TensorBoard integration with comprehensive training metrics
+- ✅ Automatic train/validation/test dataset splitting
 - ⚠️ No formal test framework setup (pytest in requirements but no tests/ directory)
 - 🔄 Active refactoring - multiple app versions coexist
