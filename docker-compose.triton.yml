@@ -1,0 +1,109 @@
+version: '3.8'
+
+services:
+  triton-converter:
+    build:
+      context: .
+      dockerfile: Dockerfile.triton
+    image: triton-model-converter:latest
+    container_name: triton-converter
+    
+    # GPU 支援
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # 環境變數
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Taipei
+    
+    # 端口映射
+    ports:
+      - "7860:7860"    # Gradio 介面
+      - "8000:8000"    # Triton HTTP
+      - "8001:8001"    # Triton GRPC
+      - "8002:8002"    # Triton Metrics
+    
+    # 數據卷映射
+    volumes:
+      - ./triton/models:/app/models              # 輸入模型目錄
+      - ./triton/converted:/app/converted_models # 輸出模型目錄
+      - ./triton/temp:/app/temp                  # 臨時目錄
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw         # X11 轉發（如需要）
+    
+    # 共享記憶體大小
+    shm_size: 2gb
+    
+    # 重啟策略
+    restart: unless-stopped
+    
+    # 健康檢查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # 可選：Triton 推論伺服器（用於測試轉換後的模型）
+  triton-server:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    container_name: triton-inference-server
+    
+    # GPU 支援
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # 環境變數
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    
+    # 端口映射
+    ports:
+      - "8100:8000"    # Triton HTTP
+      - "8101:8001"    # Triton GRPC
+      - "8102:8002"    # Triton Metrics
+    
+    # 命令覆蓋（啟動時指定模型倉庫）
+    command: tritonserver --model-repository=/models --strict-model-config=false
+    
+    # 數據卷映射
+    volumes:
+      - ./triton/triton_models:/models          # Triton 模型倉庫
+    
+    # 共享記憶體大小
+    shm_size: 2gb
+    
+    # 重啟策略
+    restart: unless-stopped
+    
+    # 依賴關係
+    depends_on:
+      - triton-converter
+    
+    # 健康檢查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+networks:
+  default:
+    name: triton-network
+    driver: bridge

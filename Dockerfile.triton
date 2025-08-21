@@ -1,0 +1,76 @@
+# Triton 模型轉換容器 - 將 timm 的 .pth 模型轉換為 TensorRT .engine/.plan
+FROM nvcr.io/nvidia/deepstream:7.1-triton-multiarch
+
+# 設定環境變數
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Taipei
+ENV PYTHONUNBUFFERED=1
+
+# 設定工作目錄
+WORKDIR /app
+
+# 更新系統並安裝必要的系統依賴
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-dev \
+    git \
+    wget \
+    curl \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# 升級 pip
+RUN python3 -m pip install --upgrade pip
+
+# 安裝 PyTorch 相關套件（CUDA 版本）
+RUN pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# 安裝 timm 和其他深度學習套件
+RUN pip3 install \
+    timm \
+    transformers \
+    onnx \
+    onnxruntime-gpu \
+    tensorrt \
+    pycuda \
+    numpy \
+    opencv-python \
+    pillow \
+    tqdm
+
+# 安裝 Gradio 和網頁相關套件
+RUN pip3 install \
+    gradio \
+    fastapi \
+    uvicorn \
+    python-multipart
+
+# 建立必要的目錄
+RUN mkdir -p /app/models \
+             /app/converted_models \
+             /app/temp \
+             /app/utils
+
+# 複製應用程式碼
+COPY triton/ /app/
+
+# 設定權限
+RUN chmod +x /app/*.py
+
+# 暴露 Gradio 和 Triton 端口
+EXPOSE 7860 8000 8001 8002
+
+# 設定 CUDA 環境變數
+ENV CUDA_VISIBLE_DEVICES=0
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# 啟動腳本
+CMD ["python3", "app.py"]
